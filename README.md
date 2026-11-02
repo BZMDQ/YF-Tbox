@@ -17,5 +17,5 @@
 
 当前仓库为公开仓库，工具箱无需 Token 即可检查和下载 Release。若将仓库设为私有或遇到 GitHub API 限流，可创建 fine-grained personal access token：只选择 `BZMDQ/YF-Tbox`，只授予 `Contents: Read-only`。在工具箱设置中粘贴后，程序会通过当前 Windows 用户 DPAPI 加密保存；Token 不进入仓库、日志或更新包。
 
-当前全量便携包和自定义目录安装程序保存在项目 `downloads/`。GitHub Release 上的 `_Update.zip` 是给已安装工具箱使用的原位更新包，不用于首次安装；用户在工具箱设置中检查更新后，程序会验证 SHA-256 并覆盖应用文件。
+当前全量便携包和自定义目录安装程序保存在项目 `downloads/`。0.8.34 用户首次升级到带更新功能的 0.8.35 时，请运行 0.8.35 安装程序并选择原工具箱目录；此后的版本可在工具箱设置中检查更新。GitHub Release 上的 `_Update.zip` 是已具备更新器的工具箱使用的原位更新包，程序会验证 SHA-256 并覆盖应用文件。
 
