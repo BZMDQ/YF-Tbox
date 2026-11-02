@@ -74,7 +74,7 @@ jobs:
           '请先退出工具箱，再将本目录内容手动覆盖到已有工具箱安装目录。该包不含 CubeProgrammer、ST-LINK 驱动、许可证或用户配置；首次安装请使用完整安装程序。' | Set-Content -LiteralPath (Join-Path $manualRoot '手动更新说明.txt') -Encoding UTF8
           $archive = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Manual_Overlay.zip"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [IO.Compression.ZipFile]::CreateFromDirectory($updateRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
+          [IO.Compression.ZipFile]::CreateFromDirectory($manualRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $hash | Set-Content -LiteralPath ($archive + '.sha256') -Encoding ASCII
           "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
