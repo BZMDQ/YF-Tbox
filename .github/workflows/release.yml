@@ -59,7 +59,8 @@ jobs:
           $build = Join-Path $env:RUNNER_TEMP 'yf-tbox-build'
           New-Item -ItemType Directory -Path $build -Force | Out-Null
           $exe = Join-Path $build "ResearchToolbox_${{ steps.metadata.outputs.version }}.exe"
-          & 'Source/build.ps1' -OneDir -OutputPath $exe -WorkPath (Join-Path $build 'work')
+          $buildScript = Join-Path $env:GITHUB_WORKSPACE 'Source\build.ps1'
+          & $buildScript -OneDir -OutputPath $exe -WorkPath (Join-Path $build 'work')
           if ($LASTEXITCODE -ne 0) { throw 'Portable application build failed.' }
           $app = Join-Path $build "ResearchToolbox_${{ steps.metadata.outputs.version }}"
           if (-not (Test-Path -LiteralPath (Join-Path $app (Split-Path -Leaf $exe)) -PathType Leaf)) {
