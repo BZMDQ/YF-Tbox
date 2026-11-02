@@ -12,6 +12,7 @@ PRODUCT = 'D133CBS'
 HARDWARE = 'D133CBV-QFN88-V1-2'
 PORT = 8899
 INFO, BEGIN, DATA, COMMIT, SIGNATURE = range(0xD100, 0xD105)
+HEALTH = 0xD105
 LIMITS = {'ota_info.bin': 512, 'd13x_os.itb': 2*1024*1024, 'rodata.fatfs': 5*1024*1024}
 
 def validate_cpio(data):
@@ -55,6 +56,21 @@ def _request(sock,op,offset=0,payload=b''):
     if response!=op:raise ValueError('D133 升级应答命令不匹配')
     return body
 
+def _device_message(data,progress):
+    """显示设备通过 LNET JSON 应答返回的兼容消息。"""
+    try:message=json.loads(data.decode('utf-8')).get('device_message','')
+    except (UnicodeDecodeError,ValueError,AttributeError):return
+    if message:progress(0,'设备消息：'+message)
+
+def _health_info(sock):
+    """优先使用无提示音健康查询；旧固件未知命令时回退到原 INFO。"""
+    try:body=_request(sock,HEALTH)
+    except RuntimeError as exc:
+        cause=exc.__cause__
+        if not isinstance(cause,DeviceError) or cause.status!=11:raise
+        body=_request(sock,INFO)
+    return json.loads(body.decode('utf-8'))
+
 def upload(host,port,path,progress,cancel):
     """工具箱后台线程传输；仅在重启后核对版本、槽位及健康状态才报告成功。"""
     data=Path(path).read_bytes();version=validate_cpio(data)
@@ -62,11 +78,13 @@ def upload(host,port,path,progress,cancel):
     if not 1<=len(signature)<=512:raise ValueError('需要有效的 RSA 签名文件 ota.cpio.sig')
     with socket.create_connection((host,int(port)),timeout=10) as sock:
         sock.settimeout(180);info=json.loads(_request(sock,INFO).decode('utf-8'))
+        _device_message(json.dumps(info,ensure_ascii=False).encode('utf-8'),progress)
         if info.get('product')!=PRODUCT or info.get('hardware')!=HARDWARE or info.get('protocol')!=1:raise ValueError('目标不是兼容的 D133CBS OTA 服务')
         current=tuple(map(int,info['version'].split('.')))
         if tuple(map(int,version.split('.')))<=current:raise ValueError('升级包版本必须高于当前固件 '+info['version'])
         metadata=struct.pack('<I32s32s32s32s',len(data),hashlib.sha256(data).digest(),PRODUCT.encode(),HARDWARE.encode(),version.encode())
-        _request(sock,BEGIN,payload=metadata)
+        begin_reply=_request(sock,BEGIN,payload=metadata)
+        _device_message(begin_reply,progress)
         for offset in range(0,len(data),16384):
             if cancel.is_set():raise InterruptedError('已停止，暂存包不会激活')
             block=data[offset:offset+16384];ack=_request(sock,DATA,offset,block)
@@ -84,7 +102,7 @@ def upload(host,port,path,progress,cancel):
         time.sleep(2)
         try:
             with socket.create_connection((host,int(port)),timeout=3) as check:
-                check.settimeout(5);state=json.loads(_request(check,INFO).decode('utf-8'))
+                check.settimeout(5);state=_health_info(check)
                 elapsed=420-(deadline-time.monotonic())
                 if state.get('version')==version and state.get('confirmed') and state.get('slot')==state.get('next_slot'):
                     progress(100,'升级完成；新系统版本、槽位和健康状态已确认');return version
@@ -92,3 +110,4 @@ def upload(host,port,path,progress,cancel):
                     raise RuntimeError('Bootloader 已回滚 OS 与 RODATA 到原版本 '+info['version'])
         except (OSError,ValueError):pass
     raise RuntimeError('OTA 已提交；420 秒内未确认新系统健康，请检查开发板状态及回滚日志')
+

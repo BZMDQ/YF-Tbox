@@ -72,6 +72,7 @@ def install(gui):
                 try:
                     def progress(percent,text):
                         self._post('ota_target_progress',(host,percent,100));self._post('ota_target_status',(host,text))
+                        if text.startswith('设备消息：'):self._post('log',f'[{host}] {text}')
                     upload(host,port,path,progress,stop_event)
                     self._post('ota_target_status',(host,'升级完成 | 新系统健康已确认'))
                     self._post('log',f'[{host}] D133CBS 新版本、启动槽位和健康确认均已核对。')
@@ -84,6 +85,7 @@ def install(gui):
         self._start_task('D133CBS TCP OTA',action,require_connection=False)
     cls._select_ota_board=change
     cls._build_ota_page=build;cls._choose_package=choose;cls._set_package=set_package;cls._upload_ota=upload_ota
+
 
 
 
