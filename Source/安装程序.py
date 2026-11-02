@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 import zipfile
 
 APP_NAME = '研发工具箱'
-APP_VERSION = '0.8.35'
+APP_VERSION = '0.8.36'
 PAYLOAD_FILE = 'toolbox_payload.zip'
 EXE_NAME = 'ResearchToolbox_' + APP_VERSION + '.exe'
 PAYLOAD_ROOT = APP_NAME + '_' + APP_VERSION + '_Onedir_Portable_Windows'

@@ -36,13 +36,10 @@ from local_tcp_client import (
     upload_w78_window, validate_package, validate_w78_filename, validate_w78_hex, parse_device_info,
     request_wait,
 )
-from github_updater import (
-    download_update, latest_update, protect_token, unprotect_token,
-)
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.35'
+APP_VERSION = '0.8.36'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -725,9 +722,6 @@ class LocalTcpApp:
         self._scroll_after_ids = {}
         self._scroll_targets = {}
         settings = self._load_settings()
-        self.github_update_token_protected = str(
-            settings.get('github_update_token_protected', '') or '')
-        self.github_update_token = unprotect_token(self.github_update_token_protected)
         self.ui_language = settings.get('language', 'zh-CN')
         try:
             self.ota_chunk_size = int(settings.get('ota_chunk_size', OTA_CHUNK_SIZE))
@@ -879,7 +873,6 @@ class LocalTcpApp:
                 'mplab_device': self.mplab_device_var.get().strip(),
                 'pk3cmd_path': str(self.mplab_cli_path) if self.mplab_cli_path else '',
                 'stm32_programmer_cli_path': self.stm32_programmer_cli_path,
-                'github_update_token_protected': self.github_update_token_protected,
             }
             if hasattr(self, 'device_names'):
                 values['device_names'] = self.device_names
@@ -947,7 +940,7 @@ class LocalTcpApp:
         dialog = ctk.CTkToplevel(self.root)
         self.settings_window = dialog
         dialog.title('设置')
-        dialog.geometry('560x640')
+        dialog.geometry('540x510')
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -1006,58 +999,6 @@ class LocalTcpApp:
         ctk.CTkLabel(card, text='多个范围用分号分隔。刷新设备会读取开发板当前名称。',
                      text_color=COLORS['muted']).pack(fill='x', padx=18)
 
-        update_box = ctk.CTkFrame(card, fg_color=COLORS['soft'], corner_radius=9)
-        update_box.pack(fill='x', padx=18, pady=(10, 2))
-        ctk.CTkLabel(update_box, text='GitHub 程序更新', font=self._font(11, 'bold'),
-                     text_color=COLORS['text'], anchor='w').pack(
-            fill='x', padx=10, pady=(8, 2))
-        ctk.CTkLabel(
-            update_box,
-            text='GitHub 仓库 BZMDQ/YF-Tbox 可直接检查；如改为私有或遇到限流，可选填 Contents 只读 Token。',
-            font=self._font(9), text_color=COLORS['muted'], anchor='w', wraplength=475,
-        ).pack(fill='x', padx=10, pady=(0, 4))
-        self.settings_github_token_var = tk.StringVar(master=dialog, value='')
-        token_entry = ctk.CTkEntry(
-            update_box, textvariable=self.settings_github_token_var, show='*',
-            placeholder_text=('已加密保存；输入新 Token 可替换' if self.github_update_token
-                              else '粘贴 GitHub fine-grained Token'),
-        )
-        token_entry.pack(fill='x', padx=10, pady=(1, 6))
-        update_actions = ctk.CTkFrame(update_box, fg_color='transparent')
-        update_actions.pack(fill='x', padx=10, pady=(0, 7))
-        self.settings_update_status_var = tk.StringVar(
-            master=dialog,
-            value=('Token 已在此 Windows 用户下加密保存' if self.github_update_token
-                   else '公开仓库无需 Token'),
-        )
-        ctk.CTkLabel(
-            update_actions, textvariable=self.settings_update_status_var,
-            text_color=COLORS['muted'], font=self._font(9), anchor='w',
-        ).pack(side='left', fill='x', expand=True)
-        self.settings_update_button = ctk.CTkButton(
-            update_actions, text='检查更新', command=self._start_github_update_check,
-            width=96, height=30, corner_radius=7, fg_color=COLORS['blue'],
-            hover_color=COLORS['blue_hover'], text_color='#FFFFFF',
-            font=self._font(9, 'bold'),
-        )
-        self.settings_update_button.pack(side='right', padx=(6, 0))
-
-        def clear_update_token():
-            self.github_update_token = ''
-            self.github_update_token_protected = ''
-            self.settings_github_token_var.set('')
-            self.settings_update_status_var.set('更新凭据已清除')
-            self._save_settings()
-            self._append_log('已清除 GitHub 更新凭据。')
-
-        ctk.CTkButton(
-            update_actions, text='清除凭据', command=clear_update_token,
-            width=76, height=30, corner_radius=7, fg_color='transparent',
-            border_width=1, border_color=COLORS['border'],
-            hover_color=COLORS['card'], text_color=COLORS['muted'],
-            font=self._font(9),
-        ).pack(side='right')
-
         actions = ctk.CTkFrame(card, fg_color='transparent')
         actions.pack(fill='x', padx=18, pady=(13, 16))
 
@@ -1087,14 +1028,6 @@ class LocalTcpApp:
                 messagebox.showerror('扫描范围无效', str(exc), parent=dialog)
                 return
             self.device_scan_ranges = self.settings_scan_var.get().strip()
-            entered_token = self.settings_github_token_var.get().strip()
-            if entered_token:
-                try:
-                    self.github_update_token_protected = protect_token(entered_token)
-                except Exception as exc:
-                    messagebox.showerror('更新凭据保存失败', str(exc), parent=dialog)
-                    return
-                self.github_update_token = entered_token
             self.ui_language = new_language
             self.ota_chunk_size = ota_kib * 1024
             self.w78_chunk_size = w78_kib * 1024
@@ -1115,119 +1048,6 @@ class LocalTcpApp:
             font=self._font(10, 'bold'),
         ).pack(side='right')
         dialog.protocol('WM_DELETE_WINDOW', close_dialog)
-
-    def _start_github_update_check(self):
-        """后台检查并下载 GitHub Release，界面线程只更新提示。"""
-        entered = ''
-        try:
-            entered = self.settings_github_token_var.get().strip()
-        except (AttributeError, tk.TclError):
-            pass
-        if entered:
-            try:
-                self.github_update_token_protected = protect_token(entered)
-                self.github_update_token = entered
-                self._save_settings()
-                self.settings_github_token_var.set('')
-            except Exception as exc:
-                messagebox.showerror('更新凭据保存失败', str(exc), parent=self.settings_window)
-                return
-        token = self.github_update_token
-        try:
-            if self.settings_update_button.winfo_exists():
-                self.settings_update_button.configure(state=tk.DISABLED)
-            self.settings_update_status_var.set('正在检查 GitHub 最新版本…')
-        except tk.TclError:
-            return
-        threading.Thread(
-            target=self._github_update_worker, args=(token,),
-            name='github-update-check', daemon=True,
-        ).start()
-
-    def _github_update_worker(self, token):
-        try:
-            update = latest_update(APP_VERSION, token)
-            if not update['available']:
-                self._post('github_update_result', ('current', update['version']))
-                return
-            cache = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'LocalTCP_Tools' / 'updates'
-            version = update['version']
-
-            def report_progress(received, total):
-                percent = int(received * 100 / max(total, 1))
-                self._post('github_update_progress', (version, percent, received, total))
-
-            archive = download_update(update, token, cache, report_progress)
-            self._post('github_update_result', ('available', update, str(archive)))
-        except Exception as exc:
-            self._post('github_update_result', ('error', str(exc)))
-
-    def _finish_github_update(self, result):
-        """在 UI 线程确认更新并启动外部替换程序。"""
-        state = result[0]
-        try:
-            if hasattr(self, 'settings_update_button') and self.settings_update_button.winfo_exists():
-                self.settings_update_button.configure(state=tk.NORMAL)
-        except tk.TclError:
-            pass
-        try:
-            if hasattr(self, 'settings_update_status_var'):
-                self.settings_update_status_var.set('')
-        except tk.TclError:
-            pass
-        if state == 'current':
-            message = '当前已是最新版本 ' + APP_VERSION
-            self._append_log(message)
-            self._set_status('已是最新版本')
-            try:
-                self.settings_update_status_var.set(message)
-            except tk.TclError:
-                pass
-            return
-        if state == 'error':
-            self._append_log('GitHub 更新检查失败：' + result[1])
-            self._set_status('更新检查失败')
-            try:
-                self.settings_update_status_var.set(result[1])
-            except tk.TclError:
-                pass
-            return
-
-        _state, update, archive_path = result
-        version = update['version'].lstrip('v')
-        release = update['release']
-        release_notes = str(release.get('body') or '').strip()
-        prompt = '发现研发工具箱新版本 {}。已下载并通过 SHA-256 校验，是否现在安装？'.format(version)
-        if release_notes:
-            prompt += '\n\n' + release_notes[:1200]
-        if not messagebox.askyesno('发现程序更新', prompt, parent=self.root):
-            self._append_log('已下载并校验工具箱更新包；本次暂不安装。')
-            return
-        executable_name = 'ResearchToolbox_{}.exe'.format(version)
-        helper = app_resource_path('toolbox_update_install.ps1')
-        if not helper.is_file():
-            helper = Path(__file__).resolve().with_name('toolbox_update_install.ps1')
-        if not helper.is_file():
-            messagebox.showerror('更新程序缺失', '找不到更新安装脚本：' + str(helper), parent=self.root)
-            return
-        powershell = shutil.which('powershell.exe')
-        if not powershell:
-            messagebox.showerror('无法启动更新', '当前 Windows 找不到 PowerShell。', parent=self.root)
-            return
-        try:
-            subprocess.Popen(
-                [powershell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(helper),
-                 '-Archive', archive_path, '-Target', str(self.base_dir),
-                 '-ParentPid', str(os.getpid()), '-ExeName', executable_name],
-                close_fds=True,
-                creationflags=(getattr(subprocess, 'DETACHED_PROCESS', 0) |
-                               getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)),
-            )
-        except OSError as exc:
-            messagebox.showerror('无法启动更新', str(exc), parent=self.root)
-            return
-        self._append_log('已通过 SHA-256 校验，正在关闭旧版本并更新到 ' + version + '。')
-        self.root.after(250, self.root.destroy)
 
     def _build_workspace(self):
         self.root.title(f'{APP_TITLE} | {APP_VERSION}')
@@ -2533,16 +2353,6 @@ class LocalTcpApp:
                     self._refresh_u12_recovery_view()
                 elif kind == 'u12_progress_text':
                     self.u12_progress_text_var.set(value)
-                elif kind == 'github_update_progress':
-                    version, percent, received, total = value
-                    text = '下载 {}：{}%（{} / {} 字节）'.format(
-                        version, percent, received, total)
-                    try:
-                        self.settings_update_status_var.set(text)
-                    except (AttributeError, tk.TclError):
-                        pass
-                elif kind == 'github_update_result':
-                    self._finish_github_update(value)
                 elif kind == 'stlink_result':
                     status, color, details = value
                     self.stlink_check_running = False

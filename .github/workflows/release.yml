@@ -1,4 +1,4 @@
-name: Build and publish YF-Tbox update
+name: Build and publish YF-Tbox manual package
 
 on:
   push:
@@ -67,11 +67,12 @@ jobs:
             throw 'PyInstaller output is incomplete.'
           }
 
-          # 更新 ZIP 只覆盖应用运行文件，保留已安装目录中的 ST-LINK、CubeProgrammer 和用户数据。
-          $updateRoot = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Update"
-          New-Item -ItemType Directory -Path $updateRoot -Force | Out-Null
-          Get-ChildItem -LiteralPath $app -Force | Copy-Item -Destination $updateRoot -Recurse -Force
-          $archive = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Update.zip"
+          # 手动覆盖包只包含工具箱应用运行文件，不会由工具箱联网自动下载或安装。
+          $manualRoot = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Manual_Overlay"
+          New-Item -ItemType Directory -Path $manualRoot -Force | Out-Null
+          Get-ChildItem -LiteralPath $app -Force | Copy-Item -Destination $manualRoot -Recurse -Force
+          '请先退出工具箱，再将本目录内容手动覆盖到已有工具箱安装目录。该包不含 CubeProgrammer、ST-LINK 驱动、许可证或用户配置；首次安装请使用完整安装程序。' | Set-Content -LiteralPath (Join-Path $manualRoot '手动更新说明.txt') -Encoding UTF8
+          $archive = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Manual_Overlay.zip"
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [IO.Compression.ZipFile]::CreateFromDirectory($updateRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -83,7 +84,7 @@ jobs:
         with:
           tag_name: ${{ steps.metadata.outputs.tag }}
           name: 研发工具箱 ${{ steps.metadata.outputs.version }}
-          body: Windows x86 原位更新包，适用于已安装工具箱；安装前校验 SHA-256。首次安装请使用项目 downloads 中的完整安装程序。
+          body: Windows x86 手动覆盖包。工具箱界面不提供自动更新；请退出工具箱后手动覆盖应用文件。首次安装请使用完整安装程序。
           files: |
             ${{ steps.build.outputs.archive }}
             ${{ steps.build.outputs.archive }}.sha256

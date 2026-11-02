@@ -48,7 +48,7 @@ New-Item -ItemType Directory -Path $syntaxCheck -Force | Out-Null
 $pyinstallerConfig = Join-Path $work 'pyinstaller-config'
 New-Item -ItemType Directory -Path $pyinstallerConfig -Force | Out-Null
 
-& $python -c "import py_compile,sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True); py_compile.compile(sys.argv[3], cfile=sys.argv[4], doraise=True); py_compile.compile(sys.argv[5], cfile=sys.argv[6], doraise=True); py_compile.compile(sys.argv[7], cfile=sys.argv[8], doraise=True); py_compile.compile(sys.argv[9], cfile=sys.argv[10], doraise=True); py_compile.compile(sys.argv[11], cfile=sys.argv[12], doraise=True); py_compile.compile(sys.argv[13], cfile=sys.argv[14], doraise=True)" `
+& $python -c "import py_compile,sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True); py_compile.compile(sys.argv[3], cfile=sys.argv[4], doraise=True); py_compile.compile(sys.argv[5], cfile=sys.argv[6], doraise=True); py_compile.compile(sys.argv[7], cfile=sys.argv[8], doraise=True); py_compile.compile(sys.argv[9], cfile=sys.argv[10], doraise=True); py_compile.compile(sys.argv[11], cfile=sys.argv[12], doraise=True)" `
     (Join-Path $source 'local_tcp_gui.py') `
     (Join-Path $syntaxCheck 'local_tcp_gui_orig.pyc') `
     (Join-Path $source 'local_tcp_client.py') `
@@ -60,9 +60,7 @@ New-Item -ItemType Directory -Path $pyinstallerConfig -Force | Out-Null
     (Join-Path $source 'd133_ota_client.py') `
     (Join-Path $syntaxCheck 'd133_ota_client.pyc') `
     (Join-Path $source 'd133_ota_ui.py') `
-    (Join-Path $syntaxCheck 'd133_ota_ui.pyc') `
-    (Join-Path $source 'github_updater.py') `
-    (Join-Path $syntaxCheck 'github_updater.pyc')
+    (Join-Path $syntaxCheck 'd133_ota_ui.pyc')
 if ($LASTEXITCODE -ne 0) {
     throw "Could not compile the packaged GUI and OTA client modules (exit code $LASTEXITCODE)"
 }
@@ -82,7 +80,6 @@ $arguments = @(
     '--hidden-import', 'pic24_hex',
     '--hidden-import', 'd133_ota_ui',
     '--hidden-import', 'd133_ota_client',
-    '--hidden-import', 'github_updater',
     '--hidden-import', 'base64',
     '--hidden-import', 'contextlib',
     '--hidden-import', 'concurrent.futures',
@@ -107,8 +104,6 @@ $arguments = @(
     '--hidden-import', 'time',
     '--hidden-import', 'types',
     '--hidden-import', 'urllib.parse',
-    '--hidden-import', 'urllib.request',
-    '--hidden-import', 'urllib.error',
     '--hidden-import', 'uuid',
     '--hidden-import', 'ssl',
     '--hidden-import', 'zlib',
@@ -128,7 +123,6 @@ $arguments = @(
     '--add-data', "$syntaxCheck\local_tcp_client.pyc;.",
     '--add-data', "$syntaxCheck\d133_ota_client.pyc;.",
     '--add-data', "$syntaxCheck\d133_ota_ui.pyc;.",
-    '--add-data', "$source\toolbox_update_install.ps1;.",
     (Join-Path $source 'launcher.py')
 )
 
