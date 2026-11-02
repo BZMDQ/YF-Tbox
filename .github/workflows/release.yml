@@ -75,7 +75,7 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           [IO.Compression.ZipFile]::CreateFromDirectory($updateRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $(Split-Path -Leaf $archive)" | Set-Content -LiteralPath ($archive + '.sha256') -Encoding ASCII
+          $hash | Set-Content -LiteralPath ($archive + '.sha256') -Encoding ASCII
           "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Publish GitHub Release
