@@ -1013,7 +1013,7 @@ class LocalTcpApp:
             fill='x', padx=10, pady=(8, 2))
         ctk.CTkLabel(
             update_box,
-            text='私有仓库 BZMDQ/YF-Tbox：使用仅此仓库 Contents 只读的 fine-grained Token。',
+            text='GitHub 仓库 BZMDQ/YF-Tbox 可直接检查；如改为私有或遇到限流，可选填 Contents 只读 Token。',
             font=self._font(9), text_color=COLORS['muted'], anchor='w', wraplength=475,
         ).pack(fill='x', padx=10, pady=(0, 4))
         self.settings_github_token_var = tk.StringVar(master=dialog, value='')
@@ -1028,7 +1028,7 @@ class LocalTcpApp:
         self.settings_update_status_var = tk.StringVar(
             master=dialog,
             value=('Token 已在此 Windows 用户下加密保存' if self.github_update_token
-                   else '尚未配置更新凭据'),
+                   else '公开仓库无需 Token'),
         )
         ctk.CTkLabel(
             update_actions, textvariable=self.settings_update_status_var,
@@ -1133,14 +1133,6 @@ class LocalTcpApp:
                 messagebox.showerror('更新凭据保存失败', str(exc), parent=self.settings_window)
                 return
         token = self.github_update_token
-        if not token:
-            self.settings_update_status_var.set('请先填入仓库只读 Token')
-            messagebox.showinfo(
-                '需要 GitHub Token',
-                'YF-Tbox 当前为私有仓库。请创建仅授权此仓库、Contents 只读的 fine-grained Token，然后粘贴到此处。',
-                parent=self.settings_window,
-            )
-            return
         try:
             if self.settings_update_button.winfo_exists():
                 self.settings_update_button.configure(state=tk.DISABLED)

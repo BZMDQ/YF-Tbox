@@ -15,7 +15,7 @@
 
 ## 首次配置更新凭据
 
-仓库为私有仓库。首次使用自动更新时，在 GitHub 创建 fine-grained personal access token：只选择 `BZMDQ/YF-Tbox`，只授予 `Contents: Read-only`。在工具箱设置中粘贴一次；程序通过当前 Windows 用户 DPAPI 加密保存，Token 不进入仓库、日志或更新包。
+当前仓库为公开仓库，工具箱无需 Token 即可检查和下载 Release。若将仓库设为私有或遇到 GitHub API 限流，可创建 fine-grained personal access token：只选择 `BZMDQ/YF-Tbox`，只授予 `Contents: Read-only`。在工具箱设置中粘贴后，程序会通过当前 Windows 用户 DPAPI 加密保存；Token 不进入仓库、日志或更新包。
 
 当前全量便携包和自定义目录安装程序保存在项目 `downloads/`。GitHub Release 上的 `_Update.zip` 是给已安装工具箱使用的原位更新包，不用于首次安装；用户在工具箱设置中检查更新后，程序会验证 SHA-256 并覆盖应用文件。
 
