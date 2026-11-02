@@ -16,7 +16,10 @@ if ([string]::IsNullOrWhiteSpace($WorkPath)) {
     $work = [IO.Path]::GetFullPath($WorkPath)
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $root '研发工具箱_0.8.35.exe'
+    $guiSource = Get-Content -LiteralPath (Join-Path $source 'local_tcp_gui.py') -Raw -Encoding UTF8
+    $versionMatch = [regex]::Match($guiSource, "(?m)^APP_VERSION\s*=\s*'([^']+)'\s*$")
+    if (-not $versionMatch.Success) { throw 'Could not read APP_VERSION from local_tcp_gui.py' }
+    $OutputPath = Join-Path $root ("ResearchToolbox_{0}.exe" -f $versionMatch.Groups[1].Value)
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $dist = Split-Path -Parent $output
