@@ -1,0 +1,14 @@
+pip==25.0.1
+setuptools==56.0.0
+PyInstaller==5.13.2
+pyinstaller-hooks-contrib==2026.9
+customtkinter==5.2.2
+Pillow==10.4.0
+opencc-python-reimplemented==0.1.7
+altgraph==0.17.5
+darkdetect==0.8.0
+importlib_metadata==8.5.0
+packaging==26.2
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+zipp==3.20.2

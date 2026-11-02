@@ -1,0 +1,6 @@
+Source/__pycache__/
+Source/build/
+Source/build_installer/
+*.pyc
+*.pyo
+*.log

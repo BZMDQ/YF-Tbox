@@ -1,0 +1,93 @@
+name: Build and publish YF-Tbox update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Source/**'
+      - 'requirements-build.txt'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yf-tbox-release
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Python 3.8 x86
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.10'
+          architecture: 'x86'
+
+      - name: Install pinned build dependencies
+        shell: pwsh
+        run: |
+          & '${{ steps.python.outputs.python-path }}' -m pip install --disable-pip-version-check -r requirements-build.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Python build dependency installation failed.' }
+
+      - name: Read version and reject duplicate Release
+        id: metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content -LiteralPath 'Source/local_tcp_gui.py' -Raw -Encoding UTF8
+          $match = [regex]::Match($source, "(?m)^APP_VERSION\s*=\s*'([^']+)'\s*$")
+          if (-not $match.Success) { throw 'Cannot read APP_VERSION from local_tcp_gui.py.' }
+          $version = $match.Groups[1].Value
+          $tag = "v$version"
+          gh release view $tag --repo BZMDQ/YF-Tbox 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists; increment APP_VERSION before publishing." }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build Windows x86 application files
+        id: build
+        shell: pwsh
+        env:
+          TOOLBOX_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = Join-Path $env:RUNNER_TEMP 'yf-tbox-build'
+          New-Item -ItemType Directory -Path $build -Force | Out-Null
+          $exe = Join-Path $build "ResearchToolbox_${{ steps.metadata.outputs.version }}.exe"
+          & 'Source/build.ps1' -OneDir -OutputPath $exe -WorkPath (Join-Path $build 'work')
+          if ($LASTEXITCODE -ne 0) { throw 'Portable application build failed.' }
+          $app = Join-Path $build "ResearchToolbox_${{ steps.metadata.outputs.version }}"
+          if (-not (Test-Path -LiteralPath (Join-Path $app (Split-Path -Leaf $exe)) -PathType Leaf)) {
+            throw 'PyInstaller output is incomplete.'
+          }
+
+          # 更新 ZIP 只覆盖应用运行文件，保留已安装目录中的 ST-LINK、CubeProgrammer 和用户数据。
+          $updateRoot = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Update"
+          New-Item -ItemType Directory -Path $updateRoot -Force | Out-Null
+          Get-ChildItem -LiteralPath $app -Force | Copy-Item -Destination $updateRoot -Recurse -Force
+          $archive = Join-Path $build "研发工具箱_${{ steps.metadata.outputs.version }}_Update.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [IO.Compression.ZipFile]::CreateFromDirectory($updateRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $archive)" | Set-Content -LiteralPath ($archive + '.sha256') -Encoding ASCII
+          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = '${{ steps.build.outputs.archive }}'
+          $sidecar = $archive + '.sha256'
+          gh release create '${{ steps.metadata.outputs.tag }}' $archive $sidecar --repo BZMDQ/YF-Tbox --title '研发工具箱 ${{ steps.metadata.outputs.version }}' --notes 'Windows x86 原位更新包。适用于已安装工具箱；安装前校验 SHA-256。首次安装请使用项目 downloads 中的完整安装程序。'
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed.' }
