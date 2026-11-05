@@ -39,7 +39,7 @@ from local_tcp_client import (
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.37'
+APP_VERSION = '0.8.38'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1266,8 +1266,20 @@ class LocalTcpApp:
         page.grid_rowconfigure(1, weight=1)
         connect_card = self._page_card(page, 0, pady=(0, 8))
         connect_card.grid_columnconfigure(0, weight=1)
+
+        # 首页连接卡按“连接地址、设备选择、认证 Key”分组，突出第一步操作。
+        heading = ctk.CTkFrame(connect_card, fg_color='transparent')
+        heading.grid(row=0, column=0, sticky='ew', padx=17, pady=(14, 0))
+        heading.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(heading, text='连接设备', font=self._font(16, 'bold'),
+                     text_color=COLORS['text']).grid(row=0, column=0, sticky='w')
+        ctk.CTkLabel(
+            heading, text='输入设备地址并读取信息，也可从已保存或发现的设备中选择。',
+            font=self._font(11), text_color=COLORS['muted'], anchor='w',
+        ).grid(row=1, column=0, sticky='w', pady=(3, 0))
+
         fields = ctk.CTkFrame(connect_card, fg_color='transparent')
-        fields.grid(row=0, column=0, sticky='ew', padx=17, pady=(14, 0))
+        fields.grid(row=1, column=0, sticky='ew', padx=17, pady=(12, 0))
         fields.grid_columnconfigure(0, weight=1)
         self._field_label(fields, '设备 IP 地址', 0, 0)
         self._field_label(fields, '端口', 0, 1, padx=(12, 0))
@@ -1279,7 +1291,7 @@ class LocalTcpApp:
         self.info_button.grid(row=1, column=2, sticky='e', padx=(12, 0))
 
         key_row = ctk.CTkFrame(connect_card, fg_color='transparent')
-        key_row.grid(row=2, column=0, sticky='ew', padx=17, pady=(12, 15))
+        key_row.grid(row=3, column=0, sticky='ew', padx=17, pady=(12, 15))
         key_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(key_row, text='Local TCP Key', font=self._font(12, 'bold'),
                      text_color=COLORS['muted']).grid(row=0, column=0, columnspan=4,
@@ -1306,21 +1318,29 @@ class LocalTcpApp:
         actions = ctk.CTkFrame(page, fg_color='transparent')
         actions.grid(row=1, column=0, sticky='nsew')
         actions.grid_columnconfigure((0, 1, 2), weight=1, uniform='quick')
-        self._shortcut_card(actions, 0, '设备信息', '查看详情', 'listen')
-        self._shortcut_card(actions, 1, '固件升级', '选择升级包', 'ota')
-        self._shortcut_card(actions, 2, '无线烧录', '选择 HEX', 'w78')
+        self._shortcut_card(actions, 0, '设备信息', '查看详情', 'listen',
+                            description='查看设备型号、状态与版本')
+        self._shortcut_card(actions, 1, '固件升级', '选择升级包', 'ota',
+                            description='选择升级包并更新固件')
+        self._shortcut_card(actions, 2, '无线烧录', '选择 HEX', 'w78',
+                            description='通过局域网烧录 HEX 文件')
         actions.grid_columnconfigure(3, weight=1, uniform='quick')
-        self._shortcut_card(actions, 3, '测试用具', '打开', 'fixture')
+        self._shortcut_card(actions, 3, '测试用具', '打开', 'fixture',
+                            description='打开硬件测试工具')
 
-    def _shortcut_card(self, parent, column, title, button_text, page):
+    def _shortcut_card(self, parent, column, title, button_text, page, description=''):
         card = ctk.CTkFrame(parent, fg_color=COLORS['card'], corner_radius=12,
                             border_width=1, border_color=COLORS['border'])
         card.grid(row=0, column=column, sticky='nsew', padx=(0 if column == 0 else 5, 5 if column < 3 else 0))
         ctk.CTkLabel(card, text=f'0{column + 1}', font=self._font(12, 'bold'),
                      text_color=COLORS['blue'], fg_color=COLORS['soft'],
                      corner_radius=7, padx=8, pady=4).pack(anchor='w', padx=13, pady=(13, 10))
-        ctk.CTkLabel(card, text=title, font=self._font(18, 'bold'),
+        ctk.CTkLabel(card, text=title, font=self._font(17, 'bold'),
                      text_color=COLORS['text']).pack(anchor='w', padx=13)
+        # 用途说明沿用次要文字色，减少卡片辨识成本，不改变原有页面跳转。
+        ctk.CTkLabel(card, text=description, font=self._font(10),
+                     text_color=COLORS['muted'], anchor='w', justify='left',
+                     wraplength=176).pack(anchor='w', padx=13, pady=(4, 8))
         button = ctk.CTkButton(card, text=button_text, command=lambda: self._show_page(page),
                                height=36, corner_radius=8, font=self._font(12, 'bold'),
                                fg_color=COLORS['soft'], hover_color=COLORS['border'],

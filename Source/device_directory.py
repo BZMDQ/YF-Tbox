@@ -442,10 +442,9 @@ def install(gui):
     def home(app):
         original_home(app)
         card = app.pages['home'].grid_slaves(row=0, column=0)[0]
-        for widget in card.grid_slaves(row=1, column=0):
-            widget.destroy()
+        # 设备选择行位于地址输入行之后、Key 设置之前。
         row = ctk.CTkFrame(card, fg_color='transparent')
-        row.grid(row=1, column=0, sticky='ew', padx=17, pady=(3, 10))
+        row.grid(row=2, column=0, sticky='ew', padx=17, pady=(3, 10))
         row.grid_columnconfigure(0, weight=1)
         app.device_combo = ctk.CTkComboBox(row, values=['尚未添加设备'],
                                          command=app._select_named_device, height=34)
