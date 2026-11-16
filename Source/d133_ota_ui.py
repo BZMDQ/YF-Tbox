@@ -13,15 +13,15 @@ def install(gui):
     def change(self,value):
         self.ota_board_var.set(value)
         # 切换开发板即清除包，防止把上一个平台的包带入新平台任务。
-        self.package_path=None;self.package_version=None;self.package_var.set('请选择 '+('ota.cpio' if selected(self) else 'OTA / App 升级包'))
+        self.package_path=None;self.package_version=None;self.package_var.set('请选择 '+('ota.cpio' if selected(self) else '系统 OTA 升级包'))
         if selected(self):
             if self.ota_selection_note:self.ota_selection_note.pack_forget()
             self.d133_ota_note.pack(fill='x',padx=18,pady=(0,12),before=self.progress)
         else:
             self.d133_ota_note.pack_forget()
             if self.ota_selection_note:self.ota_selection_note.pack(fill='x',padx=18,pady=(0,12),before=self.progress)
-        self.package_hint_var.set('D133CBS：CPIO + 同名 .sig；端口 8899；开发板屏幕确认' if selected(self) else 'STM32F750 OTA / App')
-        self.browse_button.configure(text='选择 CPIO…' if selected(self) else '选择 OTA / App…')
+        self.package_hint_var.set('D133CBS：CPIO + 同名 .sig；端口 5000；开发板屏幕确认' if selected(self) else 'STM32F750 系统 OTA')
+        self.browse_button.configure(text='选择 CPIO…' if selected(self) else '选择系统 OTA…')
         self.d133_port_entry.configure(state='normal' if selected(self) else 'disabled')
     def build(self):
         original_build(self)
@@ -31,12 +31,12 @@ def install(gui):
         self.ota_board_var=gui.tk.StringVar(master=self.root,value=STM32)
         self.ota_board_selector=self._register_action(gui.ctk.CTkComboBox(row,variable=self.ota_board_var,values=[STM32,D133],state='readonly',width=235,command=lambda value:change(self,value)))
         self.ota_board_selector.pack(side='left')
-        gui.ctk.CTkLabel(row,text='D133 端口').pack(side='left',padx=(15,6))
-        self.d133_port_var=gui.tk.StringVar(master=self.root,value='8899')
+        gui.ctk.CTkLabel(row,text='D133 TCP 端口').pack(side='left',padx=(15,6))
+        self.d133_port_var=gui.tk.StringVar(master=self.root,value='5000')
         self.d133_port_entry=self._register_action(gui.ctk.CTkEntry(row,textvariable=self.d133_port_var,width=80,state='disabled'));self.d133_port_entry.pack(side='left')
         labels=[w for w in card.winfo_children() if isinstance(w,gui.ctk.CTkLabel)]
         self.ota_selection_note=labels[-1] if labels else None
-        self.d133_ota_note=gui.ctk.CTkLabel(card,text='仅升级列表中的 D133CBS；使用本页 D133 端口；需要 RSA 签名及开发板触屏确认。',font=self._font(9),text_color=gui.COLORS['muted'],anchor='w')
+        self.d133_ota_note=gui.ctk.CTkLabel(card,text='系统信息与 OTA 共用 TCP 5000；升级需要 RSA 签名及开发板触屏确认。',font=self._font(9),text_color=gui.COLORS['muted'],anchor='w')
         self.d133_ota_note.pack_forget()
         change(self,self.ota_board_var.get())
     def set_package(self,path):

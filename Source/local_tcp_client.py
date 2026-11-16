@@ -1,11 +1,13 @@
 """Authenticated LAN system-information and complete-package OTA client."""
 import argparse
+import errno
 import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
 import socket
+import select
 import struct
 import time
 import zlib
@@ -44,13 +46,11 @@ class DeviceError(RuntimeError):
         detail = {
             11: '（设备将当前连接判定为次级只读连接；请关闭同一设备上的其他 Local TCP 客户端后重试）',
             12: '：设备不接受当前分包长度；请在设置中降低无线烧录分包后重试',
-            13: '（Key 认证失败）',
             14: '（开发板拒绝了 OTA 请求或确认超时）',
-            3: '（设备忙或已有升级任务）',
-            4: '（W78 HEX 文件名或上传信息无效）',
             6: '（W78 HEX 分片偏移或长度不正确）',
             8: '（W78 Intel HEX 格式、校验和或 APROM 地址错误）',
             9: '（升级包校验失败）',
+            13: '（Local TCP Key 认证失败）',
         }.get(status, '')
         super().__init__(f'设备返回错误 {status}{detail}')
 
@@ -120,6 +120,77 @@ def request(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
                 print(body.decode('utf-8'))  # Settings-page manual information upload.
         else:
             raise ValueError('响应命令不匹配')
+
+
+def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None,
+                      on_info=None, send_lock=None, cancel=None, on_mode=None):
+    """协商后用受限窗口发送；老固件自动回退为逐片等待 ACK。"""
+    from collections import deque
+    try:
+        capability = request(sock, 34, on_info=on_info, send_lock=send_lock)
+    except DeviceError as exc:
+        if exc.status not in (4, 11, 12):
+            raise
+        capability = None
+    window = 1
+    if capability is not None:
+        if len(capability) != 12 or capability[:4] != b'OPI1':
+            raise ValueError('OTA 流水能力响应格式错误')
+        maximum, advertised = struct.unpack_from('<II', capability, 4)
+        if maximum not in (4096, 16384) or advertised != 2:
+            raise ValueError('OTA 流水窗口超出当前客户端安全范围')
+        # 新配套固件固定使用 16 KiB，旧 4 KiB 流水固件继续兼容。
+        chunk_size = maximum if maximum == 16384 else min(chunk_size, maximum)
+        window = advertised
+    if chunk_size <= 0:
+        raise ValueError('OTA 分片大小必须为正数')
+    if on_mode:
+        on_mode(chunk_size, window)
+    total = len(package)
+    if window == 1:
+        for offset in range(0, total, chunk_size):
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError()
+            block = package[offset:offset + chunk_size]
+            ack = request(sock, 3, offset, block, on_info=on_info, send_lock=send_lock)
+            written = offset + len(block)
+            if len(ack) != 4 or struct.unpack('<I', ack)[0] != written:
+                raise ValueError('设备返回的下载进度不正确')
+            if on_progress:
+                on_progress(written)
+        return
+    pending = deque()
+    offset = 0
+    # 写 Flash 时 DMA 可容纳在途帧；不额外重发，避免不确定状态下重复写入。
+    while pending or offset < total:
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError()
+        while len(pending) < window and offset < total:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError()
+            block = package[offset:offset + chunk_size]
+            packet = frame(3, offset, block)
+            if send_lock is None:
+                sock.sendall(packet)
+            else:
+                with send_lock:
+                    sock.sendall(packet)
+            offset += len(block)
+            pending.append(offset)
+        response, ack = receive(sock)
+        if response == 0x80000001:
+            if on_info:
+                on_info(ack)
+            continue
+        if response != 0x80000003 or len(ack) != 4:
+            raise ValueError('OTA 流水确认格式错误')
+        written = struct.unpack('<I', ack)[0]
+        if written != pending[0]:
+            raise ValueError('OTA 流水确认偏移不匹配')
+        pending.popleft()
+        if on_progress:
+            on_progress(written)
+    # 所有 ACK 已读完后才返回，调用者此后才允许提交安装。
 
 
 def request_wait(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
@@ -455,32 +526,127 @@ def bind_lan_route(sock, host, cancel=None):
     return route
 
 
-def connect(args, key, on_info=None, cancel=None):
+def configure_tcp_socket(sock):
+    """统一小报文延迟和空闲连接检测；不改变OTA帧与窗口协议。"""
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     try:
-        address = ipaddress.IPv4Address(args.host)
+        if os.name == 'nt' and hasattr(socket, 'SIO_KEEPALIVE_VALS'):
+            # 空闲30秒后开始探测，每5秒一次；不发送任何业务命令。
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30000, 5000))
+        elif hasattr(socket, 'TCP_KEEPIDLE'):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except OSError:
+        # 部分旧系统仅支持SO_KEEPALIVE，仍保留系统默认探测参数。
+        pass
+
+
+def _check_cancel(cancel):
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError('连接已停止')
+
+
+def _connect_tcp(sock, endpoint, timeout, cancel):
+    """非阻塞建立TCP，使停止操作不必等完系统连接超时。"""
+    _check_cancel(cancel)
+    deadline = time.monotonic() + timeout
+    sock.setblocking(False)
+    result = sock.connect_ex(endpoint)
+    pending = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY,
+               10035, 10036, 10037}
+    if result not in (0, errno.EISCONN, 10056) and result not in pending:
+        raise OSError(result, os.strerror(result))
+    while result in pending:
+        _check_cancel(cancel)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('TCP连接超时')
+        _, writable, exceptional = select.select([], [sock], [sock], min(0.1, remaining))
+        if writable or exceptional:
+            result = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if result:
+                raise OSError(result, os.strerror(result))
+    _check_cancel(cancel)
+    sock.settimeout(timeout)
+
+
+class _HandshakeReader:
+    """仅供认证使用的总时限读取器；半帧取消/超时后必须关闭整条连接。"""
+    def __init__(self, sock, timeout, cancel):
+        self.sock = sock
+        self.deadline = time.monotonic() + timeout
+        self.cancel = cancel
+
+    def exact(self, count):
+        data = bytearray()
+        while len(data) < count:
+            _check_cancel(self.cancel)
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Local TCP Key认证超时')
+            readable, _, _ = select.select([self.sock], [], [], min(0.1, remaining))
+            if not readable:
+                continue
+            part = self.sock.recv(count - len(data))
+            if not part:
+                raise ConnectionError('设备已关闭连接')
+            data.extend(part)
+        _check_cancel(self.cancel)
+        return bytes(data)
+
+
+def connect(args, key, on_info=None, cancel=None, on_socket=None):
+    """只重试无副作用的TCP/认证握手；返回后业务命令由调用者负责。"""
+    _check_cancel(cancel)
+    # Local TCP及物理网卡选择均为IPv4；优先直接使用地址，避免额外DNS查询。
+    try:
+        host = str(ipaddress.IPv4Address(args.host))
     except (ValueError, TypeError):
-        address = None
-    if address is None:
-        sock = socket.create_connection((args.host, args.port), timeout=10)
-    else:
+        host = socket.gethostbyname(args.host)
+    _check_cancel(cancel)
+    transient = {errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED,
+                 errno.ETIMEDOUT, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                 errno.ENETDOWN, errno.EADDRNOTAVAIL,
+                 10051, 10050, 10049, 10053, 10054, 10060, 10061, 10065}
+    for attempt in range(2):
+        _check_cancel(cancel)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        stage = '创建连接'
         try:
-            bind_lan_route(sock, args.host, cancel)
-            sock.settimeout(10)
-            sock.connect((args.host, args.port))
-        except Exception:
+            if on_socket is not None:
+                on_socket(sock)
+            _check_cancel(cancel)
+            configure_tcp_socket(sock)
+            stage = '绑定网卡'
+            bind_lan_route(sock, host, cancel)
+            stage = 'TCP连接'
+            _connect_tcp(sock, (host, args.port), 3.0, cancel)
+            stage = 'Key认证'
+            sock.settimeout(5.0)
+            request(sock, 0, payload=key, on_info=on_info,
+                    reader=_HandshakeReader(sock, 5.0, cancel))
+            _check_cancel(cancel)
+            sock.settimeout(120)  # 保留W25擦除和完整包校验需要的业务超时。
+            return sock
+        except Exception as exc:
             sock.close()
-            raise
-    # Authentication should be immediate. Keep its timeout bounded so a
-    # rebooting device cannot stall reconnect checks for the OTA timeout.
-    sock.settimeout(10)
-    try:
-        request(sock, 0, payload=key, on_info=on_info)
-    except Exception:
-        sock.close()
-        raise
-    sock.settimeout(120)  # W25 erase and final full-package validation.
-    return sock
+            _check_cancel(cancel)
+            if isinstance(exc, OSError) and (stage == '绑定网卡' or
+                    getattr(exc, 'errno', None) in {errno.EADDRNOTAVAIL, errno.ENETUNREACH, 10049, 10051}):
+                from device_directory import invalidate_lan_interfaces
+                invalidate_lan_interfaces()
+            # DeviceError及CRC/响应格式错误不属于可重试传输错误。
+            retryable = isinstance(exc, (TimeoutError, ConnectionError)) or (
+                isinstance(exc, OSError) and getattr(exc, 'errno', None) in transient)
+            if isinstance(exc, InterruptedError) or not retryable or attempt:
+                raise
+            if cancel is not None:
+                if cancel.wait(0.15):
+                    raise InterruptedError('连接已停止') from exc
+            else:
+                time.sleep(0.15)
 
 
 def main():
@@ -518,12 +684,10 @@ def main():
                 print('未提供 Key；开始 OTA 后，请在开发板屏幕确认升级请求。')
             digest = hashlib.md5(package).hexdigest().encode('ascii')
             request(sock, 2, payload=struct.pack('<I', len(package)) + digest)
-            for offset in range(0, len(package), OTA_CHUNK_SIZE):
-                block = package[offset:offset + OTA_CHUNK_SIZE]
-                ack = request(sock, 3, offset, block)
-                if len(ack) != 4 or struct.unpack('<I', ack)[0] != offset + len(block):
-                    raise ValueError('下载进度响应错误')
-                print(f'\r写入 W25：{offset+len(block)}/{len(package)}', end='', flush=True)
+            upload_ota_stream(
+                sock, package,
+                on_progress=lambda written: print(
+                    f'\r写入 W25：{written}/{len(package)}', end='', flush=True))
             request(sock, 4)
             print(f'\n{version} 校验通过并提交安装，设备正在重启。')
     if args.command == 'ota':

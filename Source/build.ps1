@@ -1,6 +1,6 @@
 param(
     [string]$OutputPath,
-    [switch]$OneDir,
+    [switch]$OneDir=$true,
     [string]$WorkPath
 )
 
@@ -16,10 +16,7 @@ if ([string]::IsNullOrWhiteSpace($WorkPath)) {
     $work = [IO.Path]::GetFullPath($WorkPath)
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $guiSource = Get-Content -LiteralPath (Join-Path $source 'local_tcp_gui.py') -Raw -Encoding UTF8
-    $versionMatch = [regex]::Match($guiSource, "(?m)^APP_VERSION\s*=\s*'([^']+)'\s*$")
-    if (-not $versionMatch.Success) { throw 'Could not read APP_VERSION from local_tcp_gui.py' }
-    $OutputPath = Join-Path $root ("ResearchToolbox_{0}.exe" -f $versionMatch.Groups[1].Value)
+    $OutputPath = Join-Path $root '研发工具箱_0.8.47.exe'
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $dist = Split-Path -Parent $output
@@ -32,7 +29,7 @@ $expectedOutput = if ($OneDir) {
 }
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-    throw "Python 3.8 x86 build environment was not found: $python"
+    throw "Python build environment was not found: $python"
 }
 if (Test-Path -LiteralPath $expectedOutput) {
     throw "Refusing to overwrite an existing build output: $expectedOutput"

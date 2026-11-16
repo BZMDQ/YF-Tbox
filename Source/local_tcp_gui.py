@@ -34,12 +34,12 @@ from local_tcp_client import (
     W78_LOGICAL_CHUNK_SIZES, SocketReader,
     W78_STATE_DONE, W78_STATE_FAILED, bind_lan_route, connect, frame, receive, request,
     upload_w78_window, validate_package, validate_w78_filename, validate_w78_hex, parse_device_info,
-    request_wait,
+    request_wait, upload_ota_stream,
 )
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.39'
+APP_VERSION = '0.8.47'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -833,6 +833,17 @@ class LocalTcpApp:
             self._append_log('未导入 Key：仍可读取设备信息；进行 OTA 时需在开发板确认。')
         self.root.after(UI_FRAME_INTERVAL_MS, self._poll_events)
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
+        # 提前查询物理网卡，点击连接时直接使用短期缓存；此处不访问开发板。
+        threading.Thread(target=self._prewarm_network, name='LAN-prewarm', daemon=True).start()
+
+    @staticmethod
+    def _prewarm_network():
+        try:
+            from device_directory import lan_interfaces
+            lan_interfaces()
+        except Exception:
+            # 预热失败不阻止界面打开，真正建连时仍按正常流程重新查询。
+            pass
 
     def _load_settings(self):
         try:
@@ -1333,8 +1344,11 @@ class LocalTcpApp:
         intro = self._page_card(page, 0, pady=(0, 10))
         intro.grid_columnconfigure(0, weight=1)
         self.listen_button = self._primary_button(
-            intro, '接收设备信息', self._listen, width=175, accent='teal')
+            intro, '保持信息连接', self._listen, width=175, accent='teal')
         self.listen_button.grid(row=0, column=0, sticky='w', padx=16, pady=10)
+        ctk.CTkLabel(intro, text='只读连接中断后自动重连；停止后可执行烧录。',
+                     font=self._font(10), text_color=COLORS['muted']).grid(
+                         row=1, column=0, columnspan=2, sticky='w', padx=16, pady=(0, 10))
         ctk.CTkLabel(intro, textvariable=self.device_received_var, font=self._font(12),
                      text_color=COLORS['muted']).grid(row=0, column=1, sticky='e', padx=16)
 
@@ -1385,6 +1399,22 @@ class LocalTcpApp:
                          text_color=COLORS['muted'], anchor='w', justify='left',
                          wraplength=240).grid(row=2, column=0, sticky='ew', padx=11, pady=(0, 8))
 
+        screen_card = self._page_card(page, 2, pady=(0, 8))
+        screen_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(screen_card, text='D133 屏幕切换', font=self._font(15, 'bold'),
+                     text_color=COLORS['text']).grid(row=0, column=0, sticky='w', padx=16, pady=(12, 2))
+        self.screen_switch_status = tk.StringVar(value='读取设备信息后可切换 CS000 或 CS001')
+        ctk.CTkLabel(screen_card, textvariable=self.screen_switch_status,
+                     font=self._font(11), text_color=COLORS['muted']).grid(
+            row=1, column=0, sticky='w', padx=16, pady=(0, 8))
+        screen_buttons = ctk.CTkFrame(screen_card, fg_color='transparent')
+        screen_buttons.grid(row=0, column=1, rowspan=2, sticky='e', padx=16, pady=10)
+        self._secondary_button(screen_buttons, 'CS000 · 1024×600',
+                               lambda: self._switch_d133_screen('CS000'), width=172).pack(
+                                   side='left', padx=(0, 8))
+        self._secondary_button(screen_buttons, 'CS001 · 800×1280',
+                               lambda: self._switch_d133_screen('CS001'), width=172).pack(side='left')
+
         if self.device_info_cache is not None:
             self._update_device_metric_values(self.device_info_cache)
 
@@ -1402,7 +1432,7 @@ class LocalTcpApp:
         self.package_hint_label = ctk.CTkLabel(file_box, textvariable=self.package_hint_var,
                                               font=self._font(10), text_color=COLORS['cyan'], anchor='w')
         self.package_hint_label.grid(row=1, column=0, sticky='ew', padx=14, pady=(0, 13))
-        self.browse_button = self._secondary_button(file_box, '选择 OTA / App…', self._choose_package, width=155)
+        self.browse_button = self._secondary_button(file_box, '选择系统 OTA…', self._choose_package, width=155)
         self.browse_button.grid(row=0, column=1, rowspan=2, padx=13, pady=13)
 
         ctk.CTkLabel(
@@ -1415,7 +1445,7 @@ class LocalTcpApp:
             fg_color=COLORS['input'], text_color=COLORS['text'],
             font=self._font(12), activate_scrollbars=True,
         ))
-        # Keep one backing value for settings and both OTA/App target parsers.
+        # 系统 OTA 与设置共用目标列表；App 功能随完整固件统一更新。
         if self.ota_hosts_text:
             self.ota_hosts_input.insert('1.0', self.ota_hosts_text)
         manual_row = ctk.CTkFrame(card, fg_color='transparent')
@@ -2346,6 +2376,9 @@ class LocalTcpApp:
                     self._fixture_accept(value)
                 elif kind == 'device_info':
                     self._render_device_info(value)
+                elif kind == 'screen_switch_status':
+                    if hasattr(self, 'screen_switch_status'):
+                        self.screen_switch_status.set(value)
                 elif kind == 'connection_state':
                     self._set_connection_state(value)
                 elif kind == 'u12_recovery':
@@ -2766,54 +2799,44 @@ class LocalTcpApp:
             raise InterruptedError()
         if update_status:
             self._post('status', f'正在连接 {args.host}:{args.port}…')
-            self._post('connection_state', '连接中')
-        else:
-            self._post('connection_state', '正在重连')
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # 禁用小包合并，减少逐包确认时的等待。
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        with self.socket_lock:
-            self.connecting_socket = sock
+        self._post('connection_state', '连接中' if update_status else '正在重连')
+        observed = [None]
+        sock = None
+        failed = False
+
+        def register_socket(candidate):
+            # 重试会创建新套接字；始终登记当前对象，让停止按钮立即唤醒建连/认证。
+            with self.socket_lock:
+                if stop_event.is_set():
+                    raise InterruptedError()
+                observed[0] = candidate
+                self.connecting_socket = candidate
+
         try:
-            # 扫描和实际连接使用相同的物理网卡，跨网段时也走该网卡的网关。
-            route = bind_lan_route(sock, args.host, stop_event)
-            if route:
-                self._post('log', f'连接使用局域网网卡地址 {route[1]}。')
-            if stop_event.is_set():
-                raise InterruptedError()
-            sock.settimeout(2)
-            sock.connect((args.host, args.port))
-            if stop_event.is_set():
-                raise InterruptedError()
+            sock = connect(args, key, cancel=stop_event, on_socket=register_socket,
+                           on_info=lambda body: self._on_device_info(body)
+                           if not stop_event.is_set() else None)
             with self.socket_lock:
                 if stop_event.is_set():
                     raise InterruptedError()
                 self.connecting_socket = None
                 self.active_socket = sock
-            sock.settimeout(10)
-            request(sock, 0, payload=key, on_info=lambda body:
-                    self._on_device_info(body) if not stop_event.is_set() else None)
-            if stop_event.is_set():
-                raise InterruptedError()
-            sock.settimeout(120)
             if update_status:
                 self._post('status', '已连接并通过认证' if key else '已连接，可读取设备信息')
             self._post('connection_state', '已连接')
             yield sock
         except Exception:
-            self._post('connection_state', '未连接')
+            failed = True
             raise
         finally:
             with self.socket_lock:
                 if self.active_socket is sock:
                     self.active_socket = None
-                if self.connecting_socket is sock:
+                if self.connecting_socket is observed[0]:
                     self.connecting_socket = None
-            self._post('connection_state', '未连接')
-            try:
-                sock.close()
-            except OSError:
-                pass
+            self._post('connection_state', '未连接' if failed else '连接已释放')
+            if sock is not None:
+                self._close_socket(sock)
 
     @staticmethod
     def _friendly_error(exc, args):
@@ -3051,36 +3074,80 @@ class LocalTcpApp:
                 self._post('status', '已读取设备信息')
         self._start_task('读取设备信息', action)
 
-    def _listen(self):
+    def _switch_d133_screen(self, code):
+        if code not in ('CS000', 'CS001'):
+            return
+
         def action(args, key, stop_event):
             with self._connection(args, key, stop_event) as sock:
-                # Block while waiting for a frame. Stop Operation closes the
-                # active socket, so polling timeouts are unnecessary. In
-                # particular, restarting receive() after a timeout could
-                # mistake a partial payload for the next frame header.
-                sock.settimeout(None)
-                self._post('status', '正在等待设备上传…')
-                self._post('log', '已连接。现在可点击开发板设置页中的“发送系统信息”。')
-                while not stop_event.is_set():
-                    op, body = receive(sock)
-                    if op == 0x80000001:
+                if stop_event.is_set():
+                    raise InterruptedError()
+                try:
+                    body = request(sock, 28, payload=code.encode('ascii'),
+                                   on_info=self._on_device_info)
+                except DeviceError as exc:
+                    messages = {
+                        3: '设备正在执行其他任务，暂时不能切换屏幕。',
+                        4: '屏幕代号无效，请选择 CS000 或 CS001。',
+                        5: '设备无法保存屏幕配置或启动重启。',
+                        13: 'Key 认证失败，请导入与开发板匹配的 Local TCP Key。',
+                    }
+                    raise RuntimeError(messages.get(exc.status, str(exc))) from exc
+                if body == b'REBOOTING':
+                    self._post('screen_switch_status', f'设备已接受 {code}，正在重启…')
+                    self._post('log', f'设备已接受屏幕切换到 {code}，正在重启。')
+                    self._post('status', '屏幕切换中')
+                elif body:
+                    raise ValueError('设备屏幕切换应答内容无效。')
+                else:
+                    self._post('screen_switch_status', f'设备当前已使用 {code}。')
+                    self._post('log', f'设备当前已使用 {code}。')
+                    self._post('status', '屏幕型号已匹配')
+
+        self._start_task(f'切换屏幕到 {code}', action)
+
+    def _listen(self):
+        def action(args, key, stop_event):
+            failures = 0
+            while not stop_event.is_set():
+                connected_at = None
+                try:
+                    with self._connection(args, key, stop_event) as sock:
+                        connected_at = time.monotonic()
+                        # 只读监听建立后主动读取一次，接收帧始终由同一个线程处理。
+                        body = request(sock, 1, on_info=self._on_device_info)
                         self._on_device_info(body)
-                    else:
-                        raise ValueError(f'收到未知响应命令：{op}')
-                raise InterruptedError()
-        self._start_task('接收设备信息', action)
+                        sock.settimeout(None)
+                        self._post('status', '信息连接已保持；点击“停止”断开')
+                        while not stop_event.is_set():
+                            # 禁止超时后重启同一连接的收帧，避免把半帧当成新帧头。
+                            op, body = receive(sock)
+                            if op != 0x80000001:
+                                raise ValueError(f'收到未知响应命令：{op}')
+                            self._on_device_info(body)
+                except (ConnectionError, OSError) as exc:
+                    if stop_event.is_set():
+                        raise InterruptedError() from exc
+                    # 仅只读监听允许恢复连接；烧录、OTA 等写操作不在此重放。
+                    if connected_at is not None and time.monotonic() - connected_at >= 10:
+                        failures = 0
+                    delay = min(5.0, 0.5 * (2 ** min(failures, 4)))
+                    failures += 1
+                    self._post('connection_state', '正在重连')
+                    self._post('status', f'信息连接中断，{delay:g} 秒后重连；可停止')
+                    self._post('log', f'只读信息连接中断：{exc}；正在重连。')
+                    if stop_event.wait(delay):
+                        raise InterruptedError() from exc
+            raise InterruptedError()
+        self._start_task('保持设备信息连接', action)
 
     def _set_package(self, path):
         path = Path(path).resolve()
+        # 统一固件已取消独立 App 安装，明确拒绝旧包，避免误发旧协议。
+        if path.suffix.lower() in ('.fapp', '.fappb'):
+            raise ValueError('已取消独立 App 更新，请选择包含全部 App 的系统 OTA 包。')
         package = path.read_bytes()
-        if path.suffix.lower() == '.fappb':
-            from local_tcp_client import validate_app_bundle
-            version = str(len(validate_app_bundle(package))) + ' 个App'
-        elif path.suffix.lower() == '.fapp':
-            from local_tcp_client import validate_app_package
-            _id, version = validate_app_package(package)
-        else:
-            version = validate_package(package)
+        version = validate_package(package)
         self.package_path = path
         self.package_version = version
         self.package_var.set(path.name)
@@ -3091,7 +3158,7 @@ class LocalTcpApp:
             parent=self.root,
             title='选择完整的 STM32F750 OTA 升级包',
             initialdir=str(self.base_dir),
-            filetypes=[('固件或 App 升级包', '*.ota.bin *.fapp *.fappb'), ('所有文件', '*.*')],
+            filetypes=[('系统 OTA 升级包', '*.ota.bin'), ('所有文件', '*.*')],
         )
         if not path:
             return
@@ -4590,258 +4657,7 @@ class LocalTcpApp:
                 self._close_socket(sock)
         raise RuntimeError('设备未能分配可升级的 Local TCP 主连接。')
 
-    @contextmanager
-    def _app_batch_session(self, args, key, stop_event, host, on_info):
-        if stop_event.is_set():
-            raise InterruptedError()
-        self._post('ota_target_status', (host, '正在连接'))
-        sock = connect(args, key, on_info=on_info, cancel=stop_event)
-        if stop_event.is_set():
-            self._close_socket(sock)
-            raise InterruptedError()
-        with self.socket_lock:
-            if stop_event.is_set():
-                registered = False
-            else:
-                self.active_ota_sockets[host] = sock
-                self.ota_socket_cancel_allowed[host] = True
-                registered = True
-        if not registered:
-            self._close_socket(sock)
-            raise InterruptedError()
-        try:
-            sock.settimeout(120)
-            yield sock
-        finally:
-            with self.socket_lock:
-                if self.active_ota_sockets.get(host) is sock:
-                    self.active_ota_sockets.pop(host, None)
-                self.ota_socket_cancel_allowed.pop(host, None)
-            self._close_socket(sock)
-
-    def _upload_app(self):
-        if self.is_running:
-            return
-        try:
-            if not self.ota_hosts_input.get('1.0', 'end-1c').strip():
-                raise ValueError('请先在固件升级页的升级列表添加 App 更新目标设备。')
-            hosts = self._ota_target_hosts()
-            base_args, key = self._connection_inputs(host_override=hosts[0])
-            if not key:
-                raise ValueError('独立 App 更新需导入与开发板配套的 Key。')
-            from local_tcp_client import validate_app_package, validate_app_bundle
-            package = self.package_path.read_bytes()
-            if self.package_path.suffix.lower() == '.fappb':
-                items = validate_app_bundle(package)
-            else:
-                app_id, version = validate_app_package(package)
-                items = [(app_id, version, package)]
-        except Exception as exc:
-            messagebox.showerror('无法更新 App', str(exc), parent=self.root)
-            return
-
-        targets = [
-            (host, SimpleNamespace(host=host, port=base_args.port))
-            for host in hosts
-        ]
-        required = max(
-            max(struct.unpack_from('<I', data, 60)[0],
-                2 if struct.unpack_from('<I', data, 20)[0] == 2 else 0)
-            for _, _, data in items
-        )
-        total = sum(len(data) for _, _, data in items)
-        self._reset_ota_target_rows(hosts)
-        self.connection_summary_var.set(f'{len(hosts)} 台设备 | {base_args.port}')
-        self.ota_batch_running = True
-
-        def action(_args, _key, stop_event):
-            self._post('ota_batch_status', f'正在并行更新 App | {len(hosts)} 台设备')
-            self._post(
-                'log',
-                f'独立 App 更新目标（按升级列表）：\n' +
-                '\n'.join(self._device_display_label(host) for host in hosts),
-            )
-            self._post(
-                'log',
-                f'共 {len(items)} 个 App；每台设备使用独立连接和进度。',
-            )
-
-            def on_info(host):
-                return lambda body: self._post(
-                    'log', f'[{host}] 设备信息：\n{self._format_json(body)}',
-                )
-
-            def upgrade_target(host, args):
-                status = '升级失败'
-                category = 'failed'
-                report = ''
-                completed = 0
-                completed_apps = 0
-                commit_started = False
-                current_app_id = None
-                info_callback = on_info(host)
-                try:
-                    with self._app_batch_session(
-                        args, key, stop_event, host, info_callback,
-                    ) as sock:
-                        sock.settimeout(120)
-                        if required:
-                            self._post('ota_target_status', (host, '正在读取设备版本'))
-                            info = parse_device_info(request(
-                                sock, 1, on_info=info_callback,
-                                send_lock=self.ota_send_lock,
-                            ))
-                            if int(info.get('app_api', 0)) < required:
-                                raise ValueError('请先升级系统底座 1.1.0，再安装这些 App。')
-                        for index, (app_id, version, data) in enumerate(items, 1):
-                            if stop_event.is_set():
-                                raise InterruptedError()
-                            current_app_id = app_id
-                            status = f'正在上传 App {app_id}（{index}/{len(items)}）'
-                            self._post('ota_target_status', (host, status))
-                            self._post('log', f'[{host}] App {app_id}: {version}（{index}/{len(items)}）')
-                            digest = hashlib.md5(data).hexdigest().encode('ascii')
-                            request(
-                                sock, 20, 0, struct.pack('<II', app_id, len(data)) + digest,
-                                on_info=info_callback, send_lock=self.ota_send_lock,
-                            )
-                            committed = False
-                            try:
-                                for offset in range(0, len(data), 2028):
-                                    if stop_event.is_set():
-                                        raise InterruptedError()
-                                    block = data[offset:offset + 2028]
-                                    ack = request(
-                                        sock, 21, offset, block,
-                                        on_info=info_callback, send_lock=self.ota_send_lock,
-                                    )
-                                    if len(ack) != 4 or struct.unpack('<I', ack)[0] != offset + len(block):
-                                        raise ValueError('App 上传进度应答错误')
-                                    self._post(
-                                        'ota_target_progress',
-                                        (host, completed + offset + len(block), total),
-                                    )
-                                if stop_event.is_set():
-                                    raise InterruptedError()
-                                with self.socket_lock:
-                                    self.ota_socket_cancel_allowed[host] = False
-                                commit_started = True
-                                self._post('ota_target_status', (host, f'设备校验并提交 App {app_id}'))
-                                request(
-                                    sock, 22, on_info=info_callback,
-                                    send_lock=self.ota_send_lock,
-                                )
-                                committed = True
-                                commit_started = False
-                                completed_apps += 1
-                                with self.socket_lock:
-                                    if self.active_ota_sockets.get(host) is sock:
-                                        self.ota_socket_cancel_allowed[host] = True
-                                versions = json.loads(request(
-                                    sock, 23, on_info=info_callback,
-                                    send_lock=self.ota_send_lock,
-                                ).decode('utf-8'))
-                                actual = next((item['version'] for item in versions['apps']
-                                               if item['id'] == app_id), None)
-                                if actual != version:
-                                    raise ValueError(f'App 版本未确认：期望 {version}，返回 {actual}')
-                                completed += len(data)
-                                self._post(
-                                    'log',
-                                    f'[{host}] App {app_id} 已安装 {version}；重新打开生效，无需系统重启。',
-                                )
-                            finally:
-                                if not committed and not commit_started and not stop_event.is_set():
-                                    try:
-                                        request(
-                                            sock, 5, on_info=info_callback,
-                                            send_lock=self.ota_send_lock,
-                                        )
-                                    except Exception:
-                                        pass
-                    status = '升级完成'
-                    category = 'success'
-                    report = f'[{host}] {len(items)} 个 App 已全部安装并确认版本。'
-                except InterruptedError:
-                    if commit_started:
-                        status = '已停止等待 | App 提交待确认'
-                        category = 'pending'
-                        report = f'[{host}] App {current_app_id} 正在提交；设备端会继续完成写入，版本待确认。'
-                    elif completed_apps:
-                        status = f'已停止 | 已更新 {completed_apps}/{len(items)} 个 App'
-                        category = 'stopped'
-                        report = f'[{host}] 已停止；{completed_apps}/{len(items)} 个 App 已完成。'
-                    else:
-                        status = '已停止'
-                        category = 'stopped'
-                        report = f'[{host}] App 更新已停止。'
-                except Exception as exc:
-                    if stop_event.is_set():
-                        if commit_started:
-                            status = '已停止等待 | App 提交待确认'
-                            category = 'pending'
-                            report = f'[{host}] App {current_app_id} 正在提交；设备端会继续完成写入，版本待确认。'
-                        elif completed_apps:
-                            status = f'已停止 | 已更新 {completed_apps}/{len(items)} 个 App'
-                            category = 'stopped'
-                            report = f'[{host}] 已停止；{completed_apps}/{len(items)} 个 App 已完成。'
-                        else:
-                            status = '已停止'
-                            category = 'stopped'
-                            report = f'[{host}] App 更新已停止。'
-                    elif commit_started:
-                        status = 'App 提交结果待确认'
-                        category = 'pending'
-                        report = f'[{host}] App {current_app_id} 提交连接中断，设备安装结果待核对。'
-                    else:
-                        detail = self._friendly_error(exc, args)
-                        if completed_apps:
-                            status = f'更新失败 | 已完成 {completed_apps}/{len(items)} 个 App'
-                            category = 'failed'
-                            report = f'[{host}] 已完成 {completed_apps}/{len(items)} 个 App，后续更新失败：{detail}'
-                        else:
-                            status = '升级失败'
-                            category = 'failed'
-                            report = f'[{host}] App 更新失败：{detail}'
-                self._post('ota_target_status', (host, status))
-                if report:
-                    self._post('log', report)
-                return host, category, status
-
-            results = []
-            with ThreadPoolExecutor(
-                max_workers=len(targets), thread_name_prefix='App-target',
-            ) as executor:
-                futures = [
-                    executor.submit(upgrade_target, host, args)
-                    for host, args in targets
-                ]
-                for future in as_completed(futures):
-                    results.append(future.result())
-
-            successes = sum(category == 'success' for _host, category, _status in results)
-            pending = sum(category == 'pending' for _host, category, _status in results)
-            failures = sum(category == 'failed' for _host, category, _status in results)
-            stopped = sum(category == 'stopped' for _host, category, _status in results)
-            if stop_event.is_set():
-                summary = (
-                    f'App 更新已停止 | 完成 {successes}/{len(hosts)} 台，'
-                    f'待确认 {pending} 台，停止 {stopped} 台'
-                )
-            elif failures or pending:
-                summary = (
-                    f'App 更新结束 | 成功 {successes}/{len(hosts)} 台，'
-                    f'待确认 {pending} 台，失败 {failures} 台'
-                )
-            else:
-                summary = f'App 更新完成 | {successes}/{len(hosts)} 台'
-            self._post('ota_batch_status', summary)
-
-        self._start_task('独立 App 更新', action, require_connection=False)
-
     def _upload_ota(self):
-        if self.package_path and self.package_path.suffix.lower() in ('.fapp', '.fappb'):
-            return self._upload_app()
         if self.is_running:
             return
         if not self.package_path or not self.package_version:
@@ -4907,20 +4723,16 @@ class LocalTcpApp:
                             ) as sock:
                                 sock.settimeout(120)
                                 self._post('ota_target_status', (host, '正在传输'))
-                                for offset in range(0, total, chunk_size):
-                                    if stop_event.is_set():
-                                        raise InterruptedError()
-                                    block = package[offset:offset + chunk_size]
-                                    ack = request(
-                                        sock, 3, offset, block, on_info=info_callback,
-                                        send_lock=self.ota_send_lock,
-                                    )
-                                    written = offset + len(block)
-                                    if len(ack) != 4 or struct.unpack('<I', ack)[0] != written:
-                                        raise ValueError('设备返回的下载进度不正确。')
-                                    self._post(
-                                        'ota_target_progress', (host, written, total),
-                                    )
+                                upload_ota_stream(
+                                    sock, package, chunk_size=chunk_size,
+                                    on_info=info_callback, send_lock=self.ota_send_lock,
+                                    cancel=stop_event,
+                                    on_progress=lambda written: self._post(
+                                        'ota_target_progress', (host, written, total)),
+                                    on_mode=lambda size, window: self._post(
+                                        'log', f'[{host}] OTA 分片 {size} 字节，窗口 {window}；'
+                                        + ('DMA 流水接收已启用。' if window == 2 else '旧固件顺序传输。')),
+                                )
                                 if stop_event.is_set():
                                     raise InterruptedError()
                                 with self.socket_lock:
@@ -5125,4 +4937,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 

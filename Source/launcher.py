@@ -77,6 +77,16 @@ def main() -> None:
                     raise RuntimeError('; '.join(errors))
                 # D133 验证只构建页面、切换开发板和校验本地包，不建立任何网络连接。
                 app._show_page('ota')
+                assert 'App' not in app.browse_button.cget('text')
+                assert not hasattr(app, '_upload_app')
+                # 旧独立 App 包必须在本地拒绝，不得发起网络请求。
+                for suffix in ('.fapp', '.fappb'):
+                    try:
+                        app._set_package(Path(directory) / ('retired' + suffix))
+                    except ValueError as exc:
+                        assert '系统 OTA' in str(exc)
+                    else:
+                        raise AssertionError('仍接受独立 App 包')
                 app._select_ota_board('D133CBS · ArtInChip')
                 assert app.ota_board_var.get() == 'D133CBS · ArtInChip'
                 assert app.package_path is None
@@ -87,10 +97,17 @@ def main() -> None:
                     package_version = app.package_version
                     assert package_version
                 root.update_idletasks()
+                app._select_ota_board('STM32F750')
+                assert 'App' not in app.browse_button.cget('text')
+                app._show_page('listen')
+                assert app.listen_button.cget('text') == '保持信息连接'
                 report.write_text(json.dumps({'ok': True, 'version': gui.APP_VERSION,
                                               'pages': list(app.pages),
                                               'device_metrics': list(app.device_metric_vars),
-                                              'device_page_created': True, 'd133_board_selector': app.ota_board_var.get(), 'd133_ota_package_version': package_version}, ensure_ascii=False), encoding='utf-8')
+                                              'device_page_created': True, 'd133_selector_checked': True,
+                                              'unified_system_ota_only': True,
+                                              'listen_ui_checked': True,
+                                              'd133_ota_package_version': package_version}, ensure_ascii=False), encoding='utf-8')
         except Exception as exc:
             report.write_text(json.dumps({'ok': False, 'error': str(exc)}), encoding='utf-8')
             sys.exit(1)

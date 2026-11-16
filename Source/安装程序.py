@@ -6,6 +6,7 @@ import os
 from pathlib import Path, PurePosixPath
 import queue
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -13,17 +14,85 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import zipfile
+import uuid
 
 APP_NAME = '研发工具箱'
-APP_VERSION = '0.8.39'
+APP_VERSION = '0.8.47'
 PAYLOAD_FILE = 'toolbox_payload.zip'
 EXE_NAME = 'ResearchToolbox_' + APP_VERSION + '.exe'
 PAYLOAD_ROOT = APP_NAME + '_' + APP_VERSION + '_Onedir_Portable_Windows'
+INSTALLER_REVISION = 2
 
 
 def bundle_file(name):
     root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
     return root / name
+
+
+def check_destination_writable(destination):
+    """只创建并删除探测文件，不修改既有程序或目录权限。"""
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    probe = root / ('.toolbox-write-' + uuid.uuid4().hex + '.tmp')
+    try:
+        with probe.open('xb') as stream:
+            stream.write(b'write-check')
+    except PermissionError as exc:
+        raise PermissionError('安装目录无法写入：' + str(root) +
+                              '。请换一个可写目录，或检查系统对安装程序的访问限制。') from exc
+    finally:
+        if probe.exists():
+            probe.unlink()
+    return root
+
+
+def extract_payload(payload, destination, progress=None):
+    """安装前验证实际写权限；逐文件写入临时副本，完成后再原子替换。"""
+    root = check_destination_writable(destination)
+    with zipfile.ZipFile(payload, 'r') as archive:
+        entries = []
+        total = 0
+        for info in archive.infolist():
+            path = PurePosixPath(info.filename)
+            if path.is_absolute() or not path.parts or any(part in ('..', '') for part in path.parts):
+                raise ValueError('安装包内含无效文件路径。')
+            if path.parts[0] != PAYLOAD_ROOT:
+                raise ValueError('安装包版本与安装器版本不匹配，请下载同一版本的完整安装包。')
+            if info.is_dir() or len(path.parts) == 1:
+                continue
+            relative = Path(*path.parts[1:])
+            target = (root / relative).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ValueError('安装包文件超出目标目录。') from exc
+            entries.append((info, target, relative))
+            total += info.file_size
+        copied = 0
+        for info, target, relative in entries:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name('.' + target.name + '.' + uuid.uuid4().hex + '.install')
+            try:
+                with archive.open(info, 'r') as src, temporary.open('xb') as dst:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        copied += len(chunk)
+                        if progress:
+                            progress(copied * 100 / max(total, 1), relative.name)
+                # 只处理安装清单内程序文件的只读属性，不修改目录 ACL 或提升权限。
+                if target.is_file() and not target.stat().st_mode & stat.S_IWRITE:
+                    target.chmod(target.stat().st_mode | stat.S_IWRITE)
+                os.replace(temporary, target)
+            except PermissionError as exc:
+                raise PermissionError('无法替换程序文件：' + str(target) +
+                                      '。请关闭正在运行的工具箱后重试；若仍失败，请更换安装目录。') from exc
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+    return root, len(entries)
 
 
 def suggested_directory():
@@ -45,13 +114,23 @@ def encode_ps(text):
 
 
 def run_powershell(text):
+    system_root = Path(os.environ.get('SystemRoot') or r'C:\Windows')
+    executable = system_root / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'
+    if not executable.is_file():
+        located = shutil.which('powershell.exe')
+        if not located:
+            return subprocess.CompletedProcess([], 127, b'', b'powershell.exe not found')
+        executable = Path(located)
     encoded = encode_ps(text)
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-    return subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive',
+    try:
+        return subprocess.run([str(executable), '-NoProfile', '-NonInteractive',
                            '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, timeout=25, creationflags=flags,
                           check=False)
+    except OSError as exc:
+        return subprocess.CompletedProcess([], getattr(exc, 'winerror', 2), b'', str(exc).encode('utf-8'))
 
 
 def desktop_directory():
@@ -199,36 +278,10 @@ class Installer:
 
     def _worker(self, destination, payload, desktop):
         try:
-            destination.mkdir(parents=True, exist_ok=True)
-            root = destination.resolve()
-            with zipfile.ZipFile(payload, 'r') as archive:
-                entries = []
-                total = 0
-                for info in archive.infolist():
-                    path = PurePosixPath(info.filename)
-                    if not path.parts or path.parts[0] != PAYLOAD_ROOT or any(part in ('..', '') for part in path.parts):
-                        raise ValueError('安装包内含无效文件路径。')
-                    if info.is_dir() or len(path.parts) == 1:
-                        continue
-                    relative = Path(*path.parts[1:])
-                    target = (root / relative).resolve()
-                    try:
-                        target.relative_to(root)
-                    except ValueError:
-                        raise ValueError('安装包文件超出目标目录。')
-                    entries.append((info, target, relative))
-                    total += info.file_size
-                copied = 0
-                for info, target, relative in entries:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(info, 'r') as src, target.open('wb') as dst:
-                        while True:
-                            chunk = src.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            dst.write(chunk)
-                            copied += len(chunk)
-                            self.events.put(('progress', copied * 100 / max(total, 1), '正在安装：' + relative.name))
+            root, _ = extract_payload(
+                payload, destination,
+                lambda percent, name: self.events.put(('progress', percent, '正在安装：' + name)),
+            )
             shortcut = install_shortcuts(root, desktop)
             shortcut_note = ''
             if shortcut.returncode:
@@ -275,7 +328,7 @@ class Installer:
                     self.status.set('安装失败')
                     for widget in (self.install_button, self.close_button, self.browse, self.desktop_box, self.launch_box, self.path_entry):
                         widget.configure(state='normal')
-                    messagebox.showerror('安装失败', value + '\n\n请检查目标文件夹写入权限。', parent=self.root)
+                    messagebox.showerror('安装失败', value + '\n\n安装目录：' + self.target.get(), parent=self.root)
         except queue.Empty:
             pass
         if self.installing:
@@ -283,6 +336,22 @@ class Installer:
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == '--check-directory':
+        import json
+        import struct
+        root = check_destination_writable(Path(sys.argv[2]))
+        Path(sys.argv[3]).write_text(json.dumps({'ok': True, 'bits': struct.calcsize('P')*8,
+                                                'destination': str(root)}, ensure_ascii=False), encoding='utf-8')
+        return
+    # 验证与界面安装使用同一个解包函数，不创建快捷方式、不写注册表、不启动工具箱。
+    if len(sys.argv) == 4 and sys.argv[1] == '--verify-install':
+        import hashlib
+        import json
+        root, count = extract_payload(bundle_file(PAYLOAD_FILE), Path(sys.argv[2]))
+        report = {'ok': True, 'revision': INSTALLER_REVISION, 'entries': count,
+                  'destination': str(root), 'exe_sha256': hashlib.sha256((root / EXE_NAME).read_bytes()).hexdigest()}
+        Path(sys.argv[3]).write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
+        return
     if len(sys.argv) == 3 and sys.argv[1] == '--verify-payload':
         import hashlib
         import json

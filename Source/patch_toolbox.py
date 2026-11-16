@@ -348,7 +348,7 @@ def _walk_widgets(widget):
 
 def apply(module) -> None:
     """Patch only the requested MPLAB and U12 workflow behavior."""
-    module.APP_VERSION = "0.8.34"
+    module.APP_VERSION = "0.8.47"
     module.PIC24_U12_STATUS_HEX_ADDRESS = 0x54F00
     module.PIC24_U12_MAX_STAGED_BYTES = ((0x54800 - 0x8000) // 4) * 3
     module.discover_pk3cmd = lambda *_args, **_kwargs: None

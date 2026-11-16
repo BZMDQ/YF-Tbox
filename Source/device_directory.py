@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import ipaddress
 import json
 import queue
@@ -19,7 +20,7 @@ import unicodedata
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
-from local_tcp_client import parse_device_info, DeviceError
+from local_tcp_client import parse_device_info, DeviceError, configure_tcp_socket
 
 
 def discovery_targets(current='', known=()):
@@ -107,10 +108,60 @@ def ota_tokens(raw):
     return tokens
 
 
+_LAN_CACHE_TTL = 30.0
+_LAN_FAILURE_TTL = 2.0
+_lan_condition = threading.Condition()
+_lan_cache = []
+_lan_cache_until = 0.0
+_lan_refreshing = False
+_lan_generation = 0
+
+
+def invalidate_lan_interfaces():
+    """连接绑定失败后让下次查询重取物理网卡，不清除正在使用的快照。"""
+    global _lan_cache_until, _lan_generation
+    with _lan_condition:
+        _lan_cache_until = 0.0
+        _lan_generation += 1
+        _lan_condition.notify_all()
+
+
 def lan_interfaces(cancel=None):
+    """短期缓存物理网卡；并发连接共用一次枚举，等待者可独立取消。"""
+    global _lan_cache, _lan_cache_until, _lan_refreshing
+    with _lan_condition:
+        while True:
+            if cancel is not None and cancel.is_set():
+                return []
+            if time.monotonic() < _lan_cache_until:
+                return copy.deepcopy(_lan_cache)
+            if not _lan_refreshing:
+                _lan_refreshing = True
+                generation = _lan_generation
+                break
+            _lan_condition.wait(0.05)
+    try:
+        value = _enumerate_lan_interfaces(cancel)
+    except Exception:
+        # 刷新失败必须释放single-flight，避免所有后续连接永久等待。
+        with _lan_condition:
+            _lan_refreshing = False
+            _lan_condition.notify_all()
+        raise
+    with _lan_condition:
+        if generation == _lan_generation and not (cancel is not None and cancel.is_set()):
+            _lan_cache = copy.deepcopy(value)
+            _lan_cache_until = time.monotonic() + (_LAN_CACHE_TTL if value else _LAN_FAILURE_TTL)
+        _lan_refreshing = False
+        _lan_condition.notify_all()
+    return copy.deepcopy(value)
+
+
+def _enumerate_lan_interfaces(cancel=None):
     if os.name != 'nt':
         return []
-    script = "$ids=@(Get-WmiObject Win32_NetworkAdapter -Filter 'PhysicalAdapter=True AND NetEnabled=True' | ForEach-Object {$_.InterfaceIndex}); @(Get-WmiObject Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' | Where-Object {$ids -contains $_.InterfaceIndex} | Select-Object InterfaceIndex,Description,IPAddress,IPSubnet,DefaultIPGateway,IPConnectionMetric) | ConvertTo-Json -Compress"
+    # Get-WmiObject明确依赖系统Windows PowerShell 5.1；保留物理网卡筛选，避免TUN/VPN接管跨网段连接。
+    script = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); $ids=@(Get-WmiObject Win32_NetworkAdapter -Filter 'PhysicalAdapter=True AND NetEnabled=True' | ForEach-Object {$_.InterfaceIndex}); @(Get-WmiObject Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' | Where-Object {$ids -contains $_.InterfaceIndex} | Select-Object InterfaceIndex,Description,IPAddress,IPSubnet,DefaultIPGateway,IPConnectionMetric) | ConvertTo-Json -Compress"
     process = None
     try:
         process = subprocess.Popen(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
@@ -260,7 +311,7 @@ def probe(ip, port, request, interfaces=(), known=False, confirm=False,
                     sock.setsockopt(socket.IPPROTO_IP, getattr(socket, 'IP_UNICAST_IF', 31), struct.pack('!I', index))
                     sock.bind((source, 0))
                 sock.settimeout(1.5 if confirm else 0.8)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                configure_tcp_socket(sock)
                 stage = 'TCP连接'
                 sock.connect((ip, port))
                 reachable = True
@@ -277,9 +328,12 @@ def probe(ip, port, request, interfaces=(), known=False, confirm=False,
                     stage = '读取设备信息'
                     body = request(sock, 1)
                 value = parse_device_info(body)
-                if isinstance(value, dict) and str(value.get('board', '')).upper().startswith('STM32') and value.get('uid'):
+                board = str(value.get('board', '')).upper() if isinstance(value, dict) else ''
+                supported_board = board.startswith('STM32') and value.get('uid') if isinstance(value, dict) else False
+                supported_board = supported_board or board.startswith('D133')
+                if isinstance(value, dict) and supported_board:
                     return 'found', (ip, value)
-                return 'failed', (ip, '识别设备', '响应未包含STM32型号和设备UID', protocol)
+                return 'failed', (ip, '识别设备', '响应未包含受支持的板级型号和设备UID', protocol)
         except (OSError, ValueError, RuntimeError) as exc:
             error = str(exc) or type(exc).__name__
             return 'failed', (ip, stage, error, protocol)
@@ -790,6 +844,8 @@ def install(gui):
         if 'device_name' not in info:
             return
         uid = str(info.get('uid') or '').strip()
+        if uid.upper() == 'D133CBS-UNKNOWN':
+            uid = ''
         name = truncate_name(info.get('device_name') or '')
         if uid:
             for previous, old_uid in list(app.device_uids.items()):
