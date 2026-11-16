@@ -39,7 +39,7 @@ from local_tcp_client import (
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.48'
+APP_VERSION = '0.8.49'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -4731,7 +4731,7 @@ class LocalTcpApp:
                                         'ota_target_progress', (host, written, total)),
                                     on_mode=lambda size, window: self._post(
                                         'log', f'[{host}] OTA 分片 {size} 字节，窗口 {window}；'
-                                        + ('DMA 流水接收已启用。' if window == 2 else '旧固件顺序传输。')),
+                                        + ('DMA 流水接收已启用。' if window == 2 else '固定窗口1，逐片确认。')),
                                 )
                                 if stop_event.is_set():
                                     raise InterruptedError()

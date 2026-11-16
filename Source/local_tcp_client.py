@@ -124,73 +124,25 @@ def request(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
 
 def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None,
                       on_info=None, send_lock=None, cancel=None, on_mode=None):
-    """协商后用受限窗口发送；老固件自动回退为逐片等待 ACK。"""
-    from collections import deque
-    try:
-        capability = request(sock, 34, on_info=on_info, send_lock=send_lock)
-    except DeviceError as exc:
-        if exc.status not in (4, 11, 12):
-            raise
-        capability = None
-    window = 1
-    if capability is not None:
-        if len(capability) != 12 or capability[:4] != b'OPI1':
-            raise ValueError('OTA 流水能力响应格式错误')
-        maximum, advertised = struct.unpack_from('<II', capability, 4)
-        if maximum not in (4096, 16384) or advertised != 2:
-            raise ValueError('OTA 流水窗口超出当前客户端安全范围')
-        # 新配套固件固定使用 16 KiB，旧 4 KiB 流水固件继续兼容。
-        chunk_size = maximum if maximum == 16384 else min(chunk_size, maximum)
-        window = advertised
-    if chunk_size <= 0:
-        raise ValueError('OTA 分片大小必须为正数')
+    """系统OTA固定窗口1；每片收到累计ACK之后才发送下一片，不协商窗口2。"""
+    if not 0 < chunk_size <= OTA_CHUNK_SIZE:
+        raise ValueError('OTA分片大小必须为1到16384字节')
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError()
     if on_mode:
-        on_mode(chunk_size, window)
-    total = len(package)
-    if window == 1:
-        for offset in range(0, total, chunk_size):
-            if cancel is not None and cancel.is_set():
-                raise InterruptedError()
-            block = package[offset:offset + chunk_size]
-            ack = request(sock, 3, offset, block, on_info=on_info, send_lock=send_lock)
-            written = offset + len(block)
-            if len(ack) != 4 or struct.unpack('<I', ack)[0] != written:
-                raise ValueError('设备返回的下载进度不正确')
-            if on_progress:
-                on_progress(written)
-        return
-    pending = deque()
-    offset = 0
-    # 写 Flash 时 DMA 可容纳在途帧；不额外重发，避免不确定状态下重复写入。
-    while pending or offset < total:
+        on_mode(chunk_size, 1)
+    for offset in range(0, len(package), chunk_size):
         if cancel is not None and cancel.is_set():
             raise InterruptedError()
-        while len(pending) < window and offset < total:
-            if cancel is not None and cancel.is_set():
-                raise InterruptedError()
-            block = package[offset:offset + chunk_size]
-            packet = frame(3, offset, block)
-            if send_lock is None:
-                sock.sendall(packet)
-            else:
-                with send_lock:
-                    sock.sendall(packet)
-            offset += len(block)
-            pending.append(offset)
-        response, ack = receive(sock)
-        if response == 0x80000001:
-            if on_info:
-                on_info(ack)
-            continue
-        if response != 0x80000003 or len(ack) != 4:
-            raise ValueError('OTA 流水确认格式错误')
-        written = struct.unpack('<I', ack)[0]
-        if written != pending[0]:
-            raise ValueError('OTA 流水确认偏移不匹配')
-        pending.popleft()
+        block = package[offset:offset + chunk_size]
+        # 只发送一次，异常应答直接停止，禁止在写入结果不明时自动重放。
+        ack = request(sock, 3, offset=offset, payload=block,
+                      on_info=on_info, send_lock=send_lock)
+        written = offset + len(block)
+        if len(ack) != 4 or struct.unpack('<I', ack)[0] != written:
+            raise ValueError('OTA确认偏移或长度不匹配')
         if on_progress:
             on_progress(written)
-    # 所有 ACK 已读完后才返回，调用者此后才允许提交安装。
 
 
 def request_wait(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
