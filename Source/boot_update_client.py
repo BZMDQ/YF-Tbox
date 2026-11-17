@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 import re
 import struct
+import sys
 import time
 import zlib
 
@@ -318,6 +319,9 @@ def monitor_update(connection_factory, package, expected_uid, cancel=None,
 
 
 def main():
+    # Windows非中文区域/管道输出也使用UTF-8，避免打包完成后打印中文抛异常。
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
     parser = argparse.ArgumentParser(description='将单份内部BOOT HEX打包为F750BOT1；不连接设备。')
     parser.add_argument('--hex', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
