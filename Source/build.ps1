@@ -16,7 +16,7 @@ if ([string]::IsNullOrWhiteSpace($WorkPath)) {
     $work = [IO.Path]::GetFullPath($WorkPath)
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $root '研发工具箱_0.8.49.exe'
+    $OutputPath = Join-Path $root '研发工具箱_0.8.50.exe'
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $dist = Split-Path -Parent $output
@@ -62,6 +62,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Could not compile the packaged GUI and OTA client modules (exit code $LASTEXITCODE)"
 }
 
+# BOOT客户端/入口在实际打包前单独语法检查；不连接设备。
+& $python -c "import py_compile,sys; py_compile.compile(sys.argv[1],cfile=sys.argv[2],doraise=True); py_compile.compile(sys.argv[3],cfile=sys.argv[4],doraise=True)" `
+    (Join-Path $source 'boot_update_client.py') (Join-Path $syntaxCheck 'boot_update_client.pyc') `
+    (Join-Path $source 'boot_update_ui.py') (Join-Path $syntaxCheck 'boot_update_ui.pyc')
+if ($LASTEXITCODE -ne 0) { throw 'Could not compile BOOT update client/UI modules' }
+
 $arguments = @(
     '-m', 'PyInstaller',
     '--noconfirm',
@@ -77,6 +83,9 @@ $arguments = @(
     '--hidden-import', 'pic24_hex',
     '--hidden-import', 'd133_ota_ui',
     '--hidden-import', 'd133_ota_client',
+    '--hidden-import', 'boot_update_client',
+    '--hidden-import', 'boot_update_ui',
+    '--hidden-import', 'dataclasses',
     '--hidden-import', 'base64',
     '--hidden-import', 'contextlib',
     '--hidden-import', 'concurrent.futures',

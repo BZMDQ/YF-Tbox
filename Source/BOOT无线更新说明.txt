@@ -1,0 +1,34 @@
+内部BOOT更新（工具箱0.8.50）
+
+设备须先通过原系统OTA升级到1.4.43或更新版本。D133模式禁用此功能；配套32字节Local TCP Key必需。
+
+入口：侧栏“内部BOOT”，也可从固件升级页的独立内部BOOT卡片进入。此入口只操作当前IP的一台F750，不使用批量系统OTA列表。
+
+支持仅含0x08000000..0x0800FFFF的Boot HEX、原始完整64KiB bin或F750BOT1 boot.bin包。HEX空洞补FF，其他地址（QSPI/SRAM/选项字节等）严格拒绝。目标版本取0x0800FA00，向量、板型、头CRC和完整镜像CRC均校验。
+
+流程：本地校验 -> Key连接 -> CAP与设备UID/板型核对 -> BEGIN/DATA严格窗口1 -> STATUS READY（设备完整校验通过） -> 主线程显示当前/目标版本CRC、IP/UID及原址风险 -> 用户确认后同一worker发送一次COMMIT -> 仅STATUS/CAP只读监测。
+
+DONE不是最终成功。客户端释放旧会话并等待设备Reset，只有新连接返回IDLE、UID相同、CAP.currentVersion与完整64KiB CRC均匹配，才报告重启核验通过。UNCHANGED由设备逐字节确认同镜像，不擦写、不重启。
+
+内部BOOT只有单份，没有BOOT A/B或备份启动槽。擦除开始后断电可能无法启动，需ST-LINK恢复。FAILED或提交确认丢失时绝不自动重发写/提交或要求重启；保持供电，用同一完整包由用户重新发起动作。FAILED部分修改后，BEGIN只有total+MD5相同才由设备重验保留RAM回READY，ACK=完整长度，客户端跳过DATA并再次要求用户确认。不同包由固件拒绝。
+
+停止按钮：提交前等当前ACK后由同一worker发送CANCEL，避免响应串流交错；若固件为保护恢复镜像拒绝取消，显示保持供电恢复提示。提交后只停止电脑端等待，不发送CANCEL、不停止设备擦写。
+
+离线打包命令（不联网、不写设备）：
+python boot_update_client.py --hex InternalFlash_1.0.16.hex --output InternalFlash_1.0.16.boot.bin
+
+Python API：
+image_from_hex(path) -> bytes[65536]
+build_package(image) / validate_package(data) / load_package(path) -> BootPackage
+get_capability(sock) -> BootCapability
+stage_package(sock, package, capability, cancel=None, on_progress=None, on_info=None) -> READY状态
+commit_once(sock) -> None（只发一次；异常不允许重放）
+monitor_update(connection_factory, package, expected_uid, ...) -> unchanged或verified_after_reset
+
+包头<8s7I20s68sI>、magic F750BOT1，总65664字节，board_id=0x07500008。CAP40/BEGIN41/DATA42/COMMIT43/STATUS44/CANCEL45（十六进制）。当前版本区损坏可显示未知以允许人工恢复；目标包仍严格校验，成功版本匹配也不放宽。
+
+定向验证：python -m unittest test_boot_update -v，16项通过，0.290秒。覆盖离线CLI/HEX边界/CRC、真实127.0.0.1窗口1/ACK拒绝不重放、FAILED同包复用、保持供电、UNCHANGED、Reset后CAP+UID+CRC、空Key/D133拒绝、同worker实际确认事件后COMMIT一次。随后仅对改为调用真实UI确认处理函数的该用例单独复核通过；build.ps1 PowerShell解析通过。
+
+launcher --startup-check report.json只做隔离UI/本地包验证，不连板；新增boot_entry_checked、boot_key_required、boot_d133_isolation_checked。可设置BOOT_UPDATE_TEST_PACKAGE检查真实本地BOOT包版本。真实frozen构建/检查由主代理统一执行。
+
+本子任务未改版本、未构建/打包/发布、未连接或烧录任何实板；没有实板BOOT写入成功或断电恢复保证。独立App更新和工具箱自动更新入口未恢复。

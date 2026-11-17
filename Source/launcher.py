@@ -79,6 +79,23 @@ def main() -> None:
                 app._show_page('ota')
                 assert 'App' not in app.browse_button.cget('text')
                 assert not hasattr(app, '_upload_app')
+                # BOOT检查只创建入口和做本地/权限判定，不调用任何网络函数。
+                import boot_update_client
+                app._show_page('boot')
+                assert 'boot' in app.nav_buttons and app.boot_start_button is not None
+                app.host_var.set('127.0.0.1')
+                app.key_path = None
+                app.manual_key_var.set('')
+                try:
+                    app._boot_connection_inputs()
+                except ValueError as exc:
+                    assert 'Key' in str(exc)
+                else:
+                    raise AssertionError('BOOT入口仍允许空Key')
+                boot_version = None
+                test_boot = os.environ.get('BOOT_UPDATE_TEST_PACKAGE')
+                if test_boot:
+                    boot_version = boot_update_client.load_package(test_boot).version
                 # 旧独立 App 包必须在本地拒绝，不得发起网络请求。
                 for suffix in ('.fapp', '.fappb'):
                     try:
@@ -90,6 +107,15 @@ def main() -> None:
                 app._select_ota_board('D133CBS · ArtInChip')
                 assert app.ota_board_var.get() == 'D133CBS · ArtInChip'
                 assert app.package_path is None
+                assert app.boot_start_button.cget('state') == 'disabled'
+                assert app.boot_browse_button.cget('state') == 'disabled'
+                assert app.nav_buttons['boot'].cget('state') == 'disabled'
+                try:
+                    app._boot_connection_inputs()
+                except ValueError as exc:
+                    assert 'D133' in str(exc)
+                else:
+                    raise AssertionError('D133模式可以进入BOOT协议')
                 package_version = None
                 test_package = os.environ.get('D133_OTA_TEST_PACKAGE')
                 if test_package:
@@ -98,6 +124,7 @@ def main() -> None:
                     assert package_version
                 root.update_idletasks()
                 app._select_ota_board('STM32F750')
+                assert app.nav_buttons['boot'].cget('state') == 'normal'
                 assert 'App' not in app.browse_button.cget('text')
                 app._show_page('listen')
                 assert app.listen_button.cget('text') == '保持信息连接'
@@ -107,6 +134,10 @@ def main() -> None:
                                               'device_page_created': True, 'd133_selector_checked': True,
                                               'unified_system_ota_only': True,
                                               'listen_ui_checked': True,
+                                              'boot_entry_checked': True,
+                                              'boot_key_required': True,
+                                              'boot_d133_isolation_checked': True,
+                                              'boot_package_version': boot_version,
                                               'd133_ota_package_version': package_version}, ensure_ascii=False), encoding='utf-8')
         except Exception as exc:
             report.write_text(json.dumps({'ok': False, 'error': str(exc)}), encoding='utf-8')

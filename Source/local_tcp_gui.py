@@ -36,10 +36,11 @@ from local_tcp_client import (
     upload_w78_window, validate_package, validate_w78_filename, validate_w78_hex, parse_device_info,
     request_wait, upload_ota_stream,
 )
+import boot_update_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.49'
+APP_VERSION = '0.8.50'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -711,6 +712,12 @@ class LocalTcpApp:
         self.close_pending = False
         self.package_path = None
         self.package_version = None
+        self.boot_image_path = self.boot_package = None
+        self.boot_update_running = self.boot_commit_started = False
+        self.boot_progress = None
+        self.boot_file_var = tk.StringVar(master=root, value='未选择BOOT HEX或boot.bin')
+        self.boot_detail_var = tk.StringVar(master=root, value='仅内部0x08000000..0x0800FFFF，完整64KiB；先升级系统1.4.43。')
+        self.boot_status_var = tk.StringVar(master=root, value='只暂存到RAM，完整镜像READY后再确认单份原址提交。')
         self.progress = None
         self.w78_progress = None
         self.hex_progress = None
@@ -1101,6 +1108,7 @@ class LocalTcpApp:
             ('ota', '04  固件升级'),
             ('devices', '05  IP 地址名称配置'),
             ('fixture', '06  测试用具'),
+            ('boot', '07  内部 BOOT'),
         ]
         for index, (page, label) in enumerate(nav_items, start=2):
             button = ctk.CTkButton(
@@ -1184,6 +1192,7 @@ class LocalTcpApp:
             'w78': self._build_w78_page,
             'devices': self._build_devices_page,
             'fixture': self._build_test_fixture_page,
+            'boot': self._build_boot_page,
         }
         self._build_home_page()
         self._install_smooth_scrolling()
@@ -1493,6 +1502,31 @@ class LocalTcpApp:
         self.ota_button = self._primary_button(actions, '上传并安装', self._upload_ota,
                                                width=160, accent='teal')
         self.ota_button.pack(side='right')
+
+        boot_card = self._page_card(page, 1)
+        ctk.CTkLabel(boot_card, text='内部 BOOT 更新（单台 STM32F750）',
+                     font=self._font(14, 'bold')).pack(anchor='w', padx=18, pady=(14, 7))
+        ctk.CTkLabel(boot_card, text='与系统 OTA 分开；需先安装系统1.4.43，配套Key必需。单份原址更新，断电可能需要ST-LINK恢复。',
+                     wraplength=760, justify='left', text_color=COLORS['warning_text']).pack(fill='x', padx=18, pady=(0, 10))
+        self.boot_entry_button = self._secondary_button(boot_card, '进入内部 BOOT 更新…',
+                                                       lambda: self._show_page('boot'), width=230)
+        self.boot_entry_button.pack(anchor='w', padx=18, pady=(0, 15))
+        self._refresh_boot_controls()
+
+    def _build_boot_page(self):
+        return boot_update_ui.build_page(self, sys.modules[__name__])
+
+    def _choose_boot_image(self):
+        return boot_update_ui.choose_image(self)
+
+    def _start_boot_update(self):
+        return boot_update_ui.start_update(self)
+
+    def _boot_connection_inputs(self):
+        return boot_update_ui.connection_inputs(self)
+
+    def _refresh_boot_controls(self):
+        return boot_update_ui.refresh_controls(self)
 
     def _build_w78_page(self):
         page = self._page('w78')
@@ -1929,6 +1963,7 @@ class LocalTcpApp:
             'hex': 'ST-LINK 烧录',
             'devices': 'IP 地址名称配置',
             'fixture': '测试用具',
+            'boot': '单份内部 BOOT 更新',
         }
         if page not in self.pages:
             builder = getattr(self, 'page_builders', {}).get(page)
@@ -2456,6 +2491,8 @@ class LocalTcpApp:
                     fraction = sent / max(1, total)
                     self.w78_progress.set(fraction)
                     self.w78_progress_text_var.set(label)
+                elif kind in ('boot_status', 'boot_progress', 'boot_confirm', 'boot_finished'):
+                    boot_update_ui.handle_event(self, kind, value)
                 elif kind == 'finished':
                     if value is self.stop_event:
                         self.w78_program_started = False
@@ -2510,6 +2547,7 @@ class LocalTcpApp:
             widget.configure(state=state)
         if hasattr(self, 'w78_target_var'):
             self._select_w78_target(self.w78_target_var.get())
+        self._refresh_boot_controls()
 
     def _set_connection_state(self, value):
         self.connection_state_var.set(value)
@@ -2931,6 +2969,9 @@ class LocalTcpApp:
             self._finish_task()
             self._set_status('已停止')
             self._append_log('已清理未运行的任务状态，操作已停止。')
+            return
+        if self.boot_update_running:
+            boot_update_ui.stop_operation(self)
             return
         if self.ota_batch_running:
             with self.socket_lock:

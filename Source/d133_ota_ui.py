@@ -23,6 +23,8 @@ def install(gui):
         self.package_hint_var.set('D133CBS：CPIO + 同名 .sig；端口 5000；开发板屏幕确认' if selected(self) else 'STM32F750 系统 OTA')
         self.browse_button.configure(text='选择 CPIO…' if selected(self) else '选择系统 OTA…')
         self.d133_port_entry.configure(state='normal' if selected(self) else 'disabled')
+        # BOOT为F750单份内部Flash协议，D133模式必须禁用入口并在动作前再次拒绝。
+        self._refresh_boot_controls()
     def build(self):
         original_build(self)
         box=self.browse_button.master;card=box.master
