@@ -9,7 +9,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zlib
 
 import d133_proxy_client as proxy
@@ -93,6 +93,41 @@ class Peer:
 
 
 class ProxyTests(unittest.TestCase):
+    def test_screen_prompt_uses_explicit_boolean_capability(self):
+        package = proxy.Package(b'package', b'signature', '1.0.170')
+        cases = [
+            (info(version='1.0.170', usb_screen_confirm=False), '电脑端已确认'),
+            (info(), '等待D133屏幕确认'),
+            (info(usb_screen_confirm=True), '等待D133屏幕确认'),
+            (info(usb_screen_confirm=0), '等待D133屏幕确认'),
+        ]
+        for state, expected in cases:
+            with self.subTest(state=state):
+                progress = Mock()
+                # 读取 D100 的真实 JSON 形态，截停在 D106，验证开始写入前的提示。
+                with patch.object(proxy, 'request', side_effect=[
+                        json.dumps(state).encode(), proxy.ProxyError(3)]) as request:
+                    sock = object()
+                    initial = proxy.device_info(sock)
+                    with self.assertRaises(proxy.ProxyError):
+                        proxy.transfer(sock, package, initial, progress)
+                self.assertIn(expected, progress.call_args.args[1])
+                self.assertEqual([call.args[1] for call in request.call_args_list], [proxy.INFO, proxy.BEGIN])
+
+    def test_pc_declines_usb_update_before_any_task(self):
+        app = SimpleNamespace(
+            is_running=False, root=object(),
+            d133_proxy_path=Path('ota.cpio'), d133_proxy_signature=Path('ota.cpio.sig'),
+            _connection_inputs=Mock(return_value=(SimpleNamespace(host='127.0.0.1', port=5000), b'k' * 32)),
+            _start_task=Mock(),
+        )
+        package = proxy.Package(b'package', b'signature', '1.0.170')
+        with patch.object(proxy, 'load_package', return_value=package), \
+                patch.object(ui.messagebox, 'askyesno', return_value=False) as confirm:
+            ui.start_update(app)
+        confirm.assert_called_once()
+        app._start_task.assert_not_called()
+
     def setUp(self):
         self.package = proxy.Package(cpio(), b'signed', '1.0.170')
 

@@ -102,7 +102,7 @@ def _ack(body, expected, operation):
 
 
 def transfer(sock, package, info, progress, cancel=None, on_commit=None):
-    """连接已认证，BEGIN后由D133屏幕确认；取消只在当前响应完成后发送。"""
+    """按设备能力显示确认方式，取消只在当前响应完成后发送。"""
     if not info['confirmed'] or info['slot'] != info['next_slot']:
         raise ValueError('D133当前槽尚未健康确认，禁止开始下一次更新')
     _check_cancel(cancel)
@@ -111,7 +111,12 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
                            PRODUCT.encode(), HARDWARE.encode(), package.version.encode())
     committed = False
     try:
-        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；等待D133屏幕确认写入槽{target}')
+        # 只有设备明确报告 JSON false 才免屏幕确认，旧固件缺少字段。
+        if info.get('usb_screen_confirm') is False:
+            confirmation = f'电脑端已确认，D133将校验签名并更新非活动槽{target}'
+        else:
+            confirmation = f'等待D133屏幕确认写入槽{target}'
+        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{confirmation}')
         request(sock, BEGIN, payload=metadata + package.signature)
         started = time.monotonic()
         for offset in range(0, len(package.data), CHUNK_SIZE):

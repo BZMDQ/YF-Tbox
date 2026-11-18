@@ -41,10 +41,12 @@ import d133_proxy_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.51'
+APP_VERSION = '0.8.52'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
+WIRELESS_HEX_MODE = 'hex'
+WIRELESS_D133_MODE = 'd133'
 TRANSFER_CHUNK_SIZES = (1024, 2048, 4096, 8192, 16384)
 SITE_RESOURCE_SLUG = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
 SITE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
@@ -1090,7 +1092,7 @@ class LocalTcpApp:
         sidebar.grid(row=0, column=0, sticky='nsw', padx=(0, 16))
         sidebar.grid_propagate(False)
         sidebar.grid_columnconfigure(0, weight=1)
-        sidebar.grid_rowconfigure(10, weight=1)
+        sidebar.grid_rowconfigure(9, weight=1)
 
         brand = ctk.CTkFrame(sidebar, fg_color='transparent')
         brand.grid(row=0, column=0, sticky='ew', padx=14, pady=(12, 16))
@@ -1111,7 +1113,6 @@ class LocalTcpApp:
             ('devices', '05  IP 地址名称配置'),
             ('fixture', '06  测试用具'),
             ('boot', '07  内部 BOOT'),
-            ('d133_usb', '08  D133 USB A/B'),
         ]
         for index, (page, label) in enumerate(nav_items, start=2):
             button = ctk.CTkButton(
@@ -1124,7 +1125,7 @@ class LocalTcpApp:
             self.nav_buttons[page] = button
 
         side_info = ctk.CTkFrame(sidebar, fg_color=COLORS['sidebar_card'], corner_radius=13)
-        side_info.grid(row=11, column=0, sticky='ew', padx=11, pady=(10, 12))
+        side_info.grid(row=10, column=0, sticky='ew', padx=11, pady=(10, 12))
         ctk.CTkLabel(side_info, text='当前设备', font=self._font(10, 'bold'),
                      text_color=COLORS['muted']).pack(anchor='w', padx=12, pady=(11, 3))
         ctk.CTkLabel(side_info, textvariable=self.connection_summary_var,
@@ -1138,7 +1139,7 @@ class LocalTcpApp:
                      font=self._font(10), text_color=COLORS['cyan'],
                      anchor='w').pack(anchor='w', padx=12, pady=(2, 10))
         footer = ctk.CTkFrame(sidebar, fg_color='transparent')
-        footer.grid(row=12, column=0, sticky='ew', padx=13, pady=(0, 10))
+        footer.grid(row=11, column=0, sticky='ew', padx=13, pady=(0, 10))
         footer.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(footer, text=f'Windows  {APP_VERSION}',
                      font=self._font(12), text_color=COLORS['muted']).grid(
@@ -1196,7 +1197,6 @@ class LocalTcpApp:
             'devices': self._build_devices_page,
             'fixture': self._build_test_fixture_page,
             'boot': self._build_boot_page,
-            'd133_usb': lambda: d133_proxy_ui.build_page(self, sys.modules[__name__]),
         }
         self._build_home_page()
         self._install_smooth_scrolling()
@@ -1332,7 +1332,7 @@ class LocalTcpApp:
         actions.grid_columnconfigure((0, 1, 2), weight=1, uniform='quick')
         self._shortcut_card(actions, 0, '设备信息', '查看详情', 'listen')
         self._shortcut_card(actions, 1, '固件升级', '选择升级包', 'ota')
-        self._shortcut_card(actions, 2, '无线烧录', '选择 HEX', 'w78')
+        self._shortcut_card(actions, 2, '无线烧录', '打开', 'w78')
         actions.grid_columnconfigure(3, weight=1, uniform='quick')
         self._shortcut_card(actions, 3, '测试用具', '打开', 'fixture')
 
@@ -1534,11 +1534,37 @@ class LocalTcpApp:
 
     def _build_w78_page(self):
         page = self._page('w78')
-        page.grid_columnconfigure(0, weight=1)
-        card = self._page_card(page, 0, pady=(0, 8))
+        modes = self._page_card(page, 0, pady=(0, 8))
+        # 使用固定模式值，简繁转换只改变显示文字，保留当前选项。
+        self.wireless_mode_var = tk.StringVar(master=self.root, value=WIRELESS_HEX_MODE)
+        self.wireless_hex_choice = self._register_action(ctk.CTkRadioButton(
+            modes, text='W78 / PIC24 HEX', variable=self.wireless_mode_var,
+            value=WIRELESS_HEX_MODE, command=self._show_wireless_mode, font=self._font(12, 'bold')))
+        self.wireless_hex_choice.pack(side='left', padx=(18, 20), pady=12)
+        self.wireless_d133_choice = self._register_action(ctk.CTkRadioButton(
+            modes, text='D133 USB A/B', variable=self.wireless_mode_var,
+            value=WIRELESS_D133_MODE, command=self._show_wireless_mode, font=self._font(12, 'bold')))
+        self.wireless_d133_choice.pack(side='left', padx=(0, 18), pady=12)
+        self.wireless_hex_card = self._build_wireless_hex_card(page)
+        self.wireless_d133_card = d133_proxy_ui.build_card(self, sys.modules[__name__], page, row=1)
+        self._show_wireless_mode()
+        if self.is_running:
+            self._set_controls_enabled(False)
+
+    def _show_wireless_mode(self):
+        # 保留各模式已选的文件和设置，切换时仅更换可见表单。
+        if self.wireless_mode_var.get() == WIRELESS_D133_MODE:
+            self.wireless_hex_card.grid_remove()
+            self.wireless_d133_card.grid()
+        else:
+            self.wireless_d133_card.grid_remove()
+            self.wireless_hex_card.grid()
+
+    def _build_wireless_hex_card(self, page):
+        card = self._page_card(page, 1, pady=(0, 8))
 
         target_row = ctk.CTkFrame(card, fg_color='transparent')
-        target_row.pack(fill='x', padx=18, pady=(0, 8))
+        target_row.pack(fill='x', padx=18, pady=(12, 8))
         ctk.CTkLabel(target_row, text='烧录对象', font=self._font(11, 'bold'),
                      text_color=COLORS['text']).pack(side='left', padx=(0, 10))
         self.w78_target_var = tk.StringVar(master=self.root, value='W78E516DDG（已接入）')
@@ -1599,6 +1625,7 @@ class LocalTcpApp:
         self.w78_target_notice.pack(fill='x', padx=18, pady=(0, 10))
         self.w78_target_notice.pack_forget()
         self._select_w78_target(self.w78_target_var.get())
+        return card
 
     def _select_w78_target(self, value):
         connected = value.startswith(('W78E516DDG', 'PIC24FJ256DA210'))
@@ -1968,7 +1995,6 @@ class LocalTcpApp:
             'devices': 'IP 地址名称配置',
             'fixture': '测试用具',
             'boot': '单份内部 BOOT 更新',
-            'd133_usb': 'D133 经F750 USB A/B更新',
         }
         if page not in self.pages:
             builder = getattr(self, 'page_builders', {}).get(page)

@@ -79,6 +79,20 @@ def main() -> None:
                 app._show_page('ota')
                 assert 'App' not in app.browse_button.cget('text')
                 assert not hasattr(app, '_upload_app')
+                # 检查无线烧录页内的实际控件，切换模式不会打开单独页面。
+                app._show_page('w78')
+                assert 'd133_usb' not in app.nav_buttons and 'd133_usb' not in app.page_builders
+                assert app.wireless_mode_var.get() == gui.WIRELESS_HEX_MODE
+                assert app.wireless_hex_card.winfo_manager() == 'grid'
+                assert not app.wireless_d133_card.winfo_manager()
+                app.wireless_d133_choice.invoke()
+                assert app.active_page_key == 'w78' and app.wireless_mode_var.get() == gui.WIRELESS_D133_MODE
+                assert app.wireless_d133_card.winfo_manager() == 'grid'
+                assert not app.wireless_hex_card.winfo_manager()
+                app.wireless_hex_choice.invoke()
+                assert app.wireless_mode_var.get() == gui.WIRELESS_HEX_MODE
+                assert app.wireless_hex_card.winfo_manager() == 'grid'
+                assert not app.wireless_d133_card.winfo_manager()
                 # BOOT检查只创建入口和做本地/权限判定，不调用任何网络函数。
                 import boot_update_client
                 app._show_page('boot')
@@ -134,6 +148,7 @@ def main() -> None:
                                               'device_page_created': True, 'd133_selector_checked': True,
                                               'unified_system_ota_only': True,
                                               'listen_ui_checked': True,
+                                              'wireless_modes_checked': True,
                                               'boot_entry_checked': True,
                                               'boot_key_required': True,
                                               'boot_d133_isolation_checked': True,
