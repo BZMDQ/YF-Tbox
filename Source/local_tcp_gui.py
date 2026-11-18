@@ -37,10 +37,11 @@ from local_tcp_client import (
     request_wait, upload_ota_stream,
 )
 import boot_update_ui
+import d133_proxy_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.50'
+APP_VERSION = '0.8.51'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -714,6 +715,7 @@ class LocalTcpApp:
         self.package_version = None
         self.boot_image_path = self.boot_package = None
         self.boot_update_running = self.boot_commit_started = False
+        d133_proxy_ui.initialize(self, sys.modules[__name__])
         self.boot_progress = None
         self.boot_file_var = tk.StringVar(master=root, value='未选择BOOT HEX或boot.bin')
         self.boot_detail_var = tk.StringVar(master=root, value='仅内部0x08000000..0x0800FFFF，完整64KiB；先升级系统1.4.43。')
@@ -1088,7 +1090,7 @@ class LocalTcpApp:
         sidebar.grid(row=0, column=0, sticky='nsw', padx=(0, 16))
         sidebar.grid_propagate(False)
         sidebar.grid_columnconfigure(0, weight=1)
-        sidebar.grid_rowconfigure(8, weight=1)
+        sidebar.grid_rowconfigure(10, weight=1)
 
         brand = ctk.CTkFrame(sidebar, fg_color='transparent')
         brand.grid(row=0, column=0, sticky='ew', padx=14, pady=(12, 16))
@@ -1109,19 +1111,20 @@ class LocalTcpApp:
             ('devices', '05  IP 地址名称配置'),
             ('fixture', '06  测试用具'),
             ('boot', '07  内部 BOOT'),
+            ('d133_usb', '08  D133 USB A/B'),
         ]
         for index, (page, label) in enumerate(nav_items, start=2):
             button = ctk.CTkButton(
-                sidebar, text=label, anchor='w', height=42, corner_radius=8,
+                sidebar, text=label, anchor='w', height=38, corner_radius=8,
                 font=self._font(12, 'bold'), text_color=COLORS['muted'],
                 fg_color='transparent', hover_color=COLORS['soft'],
                 command=lambda selected=page: self._show_page(selected),
             )
-            button.grid(row=index, column=0, sticky='ew', padx=10, pady=3)
+            button.grid(row=index, column=0, sticky='ew', padx=10, pady=2)
             self.nav_buttons[page] = button
 
         side_info = ctk.CTkFrame(sidebar, fg_color=COLORS['sidebar_card'], corner_radius=13)
-        side_info.grid(row=9, column=0, sticky='ew', padx=11, pady=(10, 12))
+        side_info.grid(row=11, column=0, sticky='ew', padx=11, pady=(10, 12))
         ctk.CTkLabel(side_info, text='当前设备', font=self._font(10, 'bold'),
                      text_color=COLORS['muted']).pack(anchor='w', padx=12, pady=(11, 3))
         ctk.CTkLabel(side_info, textvariable=self.connection_summary_var,
@@ -1135,7 +1138,7 @@ class LocalTcpApp:
                      font=self._font(10), text_color=COLORS['cyan'],
                      anchor='w').pack(anchor='w', padx=12, pady=(2, 10))
         footer = ctk.CTkFrame(sidebar, fg_color='transparent')
-        footer.grid(row=10, column=0, sticky='ew', padx=13, pady=(0, 10))
+        footer.grid(row=12, column=0, sticky='ew', padx=13, pady=(0, 10))
         footer.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(footer, text=f'Windows  {APP_VERSION}',
                      font=self._font(12), text_color=COLORS['muted']).grid(
@@ -1193,6 +1196,7 @@ class LocalTcpApp:
             'devices': self._build_devices_page,
             'fixture': self._build_test_fixture_page,
             'boot': self._build_boot_page,
+            'd133_usb': lambda: d133_proxy_ui.build_page(self, sys.modules[__name__]),
         }
         self._build_home_page()
         self._install_smooth_scrolling()
@@ -1964,6 +1968,7 @@ class LocalTcpApp:
             'devices': 'IP 地址名称配置',
             'fixture': '测试用具',
             'boot': '单份内部 BOOT 更新',
+            'd133_usb': 'D133 经F750 USB A/B更新',
         }
         if page not in self.pages:
             builder = getattr(self, 'page_builders', {}).get(page)
@@ -2493,6 +2498,8 @@ class LocalTcpApp:
                     self.w78_progress_text_var.set(label)
                 elif kind in ('boot_status', 'boot_progress', 'boot_confirm', 'boot_finished'):
                     boot_update_ui.handle_event(self, kind, value)
+                elif kind in ('d133_proxy_progress', 'd133_proxy_commit', 'd133_proxy_finished'):
+                    d133_proxy_ui.handle_event(self, kind, value)
                 elif kind == 'finished':
                     if value is self.stop_event:
                         self.w78_program_started = False
@@ -2969,6 +2976,9 @@ class LocalTcpApp:
             self._finish_task()
             self._set_status('已停止')
             self._append_log('已清理未运行的任务状态，操作已停止。')
+            return
+        if self.d133_proxy_running:
+            d133_proxy_ui.stop_operation(self)
             return
         if self.boot_update_running:
             boot_update_ui.stop_operation(self)

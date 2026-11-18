@@ -1,0 +1,287 @@
+"""代理路径的真实socket/帧模型；仅127.0.0.1及临时文件，不连接硬件。"""
+from contextlib import closing, contextmanager
+import json
+from pathlib import Path
+import select
+import socket
+import struct
+import tempfile
+import threading
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import zlib
+
+import d133_proxy_client as proxy
+import d133_proxy_ui as ui
+import local_tcp_client as tcp
+
+
+def info(**changes):
+    value = dict(product=proxy.PRODUCT, hardware=proxy.HARDWARE, protocol=1,
+                 stream_ota=2, usb_ota=1, version='1.0.169', slot='A', next_slot='A', confirmed=True)
+    value.update(changes)
+    return value
+
+
+def cpio():
+    def member(name, body):
+        # 官方crc CPIO头：13个8位十六进制字段。
+        values = [0, 0o100644, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name) + 1, sum(body) & 0xffffffff]
+        value = b'070702' + b''.join(f'{x:08x}'.encode() for x in values) + name.encode() + b'\0'
+        value += b'\0' * (-len(value) % 4)
+        value += body
+        return value + b'\0' * (-len(value) % 4)
+    total = 0
+    for _ in range(4):
+        text = b'\0'.join(x.encode() for x in ['[image]', f'size = "{total}";', 'version = "1.0.170";',
+                                                '[file]', 'ota_info.bin:file;', 'd13x_os.itb:os;']) + b'\0'
+        data = member('ota_info.bin', b'\0' * 4 + text.ljust(508, b'\0'))
+        data += member('d13x_os.itb', b'x' * 9000) + member('TRAILER!!!', b'')
+        total = len(data)
+    return data
+
+
+def read_frame(sock):
+    header = tcp.exact(sock, 20)
+    magic, op, offset, size, crc = tcp.HEADER.unpack(header)
+    if magic != b'LNET' or size > 4096:
+        raise AssertionError('代理请求越界或错误magic')
+    body = tcp.exact(sock, size)
+    if zlib.crc32(body, zlib.crc32(header[:16])) & 0xffffffff != crc:
+        raise AssertionError('客户端请求CRC不匹配')
+    return op, offset, body
+
+
+def reply(sock, op, body=b'', status=0):
+    value = tcp.frame(op | 0x80000000, status, body)
+    # 故意分割帧头/CRC/payload，验证生产解析器跨recv正确组帧。
+    for start, end in [(0, 3), (3, 18), (18, len(value))]:
+        sock.sendall(value[start:end])
+
+
+class Peer:
+    def __init__(self, handler):
+        self.handler, self.errors = handler, []
+
+    def __enter__(self):
+        server = socket.socket()
+        server.bind(('127.0.0.1', 0))
+        server.listen(1)
+        server.settimeout(2)
+        self.sock = socket.create_connection(server.getsockname(), timeout=2)
+        def work():
+            try:
+                with server.accept()[0] as sock:
+                    sock.settimeout(2)
+                    self.handler(sock)
+            except Exception as exc:
+                self.errors.append(exc)
+            finally:
+                server.close()
+        self.thread = threading.Thread(target=work, daemon=True)
+        self.thread.start()
+        return self.sock
+
+    def __exit__(self, *_):
+        self.sock.close()
+        self.thread.join(3)
+        if self.thread.is_alive():
+            raise AssertionError('回环模型未退出')
+        if self.errors:
+            raise self.errors[0]
+
+
+class ProxyTests(unittest.TestCase):
+    def setUp(self):
+        self.package = proxy.Package(cpio(), b'signed', '1.0.170')
+
+    def test_local_cpio_and_matching_signature(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            path = Path(folder) / 'ota.cpio'
+            path.write_bytes(self.package.data)
+            sig = Path(str(path) + '.sig')
+            sig.write_bytes(b'signed')
+            self.assertEqual(proxy.load_package(path).version, '1.0.170')
+            with self.assertRaisesRegex(ValueError, '同一目录'):
+                proxy.load_package(path, Path(folder) / 'other.sig')
+            sig.write_bytes(b'x' * 513)
+            with self.assertRaisesRegex(ValueError, '512'):
+                proxy.load_package(path)
+
+    def test_proxy_info_ignores_f750_unsolicited_information(self):
+        def handler(sock):
+            self.assertEqual(read_frame(sock), (proxy.INFO, 0, b''))
+            reply(sock, 1, json.dumps({'board': 'STM32F750', 'version': '1.4.49'}).encode())
+            reply(sock, proxy.INFO, json.dumps(info()).encode())
+        with Peer(handler) as sock:
+            self.assertEqual(proxy.device_info(sock)['product'], proxy.PRODUCT)
+
+    def test_old_or_wrong_target_is_rejected(self):
+        for body in ({'board': 'F750'}, info(usb_ota=0), info(slot=0), info(confirmed='true')):
+            def handler(sock):
+                read_frame(sock)
+                reply(sock, proxy.INFO, json.dumps(body).encode())
+            with self.subTest(body=body), Peer(handler) as sock, self.assertRaises(ValueError):
+                proxy.device_info(sock)
+
+    def test_transfer_window1_fixed_chunks_and_single_commit(self):
+        ops = []
+        def handler(sock):
+            op, offset, body = read_frame(sock)
+            ops.append(op)
+            self.assertEqual((op, offset), (proxy.BEGIN, 0))
+            self.assertEqual(struct.unpack_from('<I', body)[0], len(self.package.data))
+            self.assertEqual(len(body), 132 + len(self.package.signature))
+            reply(sock, op)
+            received = 0
+            while received < len(self.package.data):
+                op, offset, body = read_frame(sock)
+                ops.append(op)
+                self.assertEqual((op, offset), (proxy.DATA, received))
+                self.assertEqual(body, self.package.data[received:received + 4096])
+                self.assertFalse(select.select([sock], [], [], .005)[0], '下一片越过当前ACK')
+                received += len(body)
+                reply(sock, op, struct.pack('<I', received))
+            self.assertEqual(read_frame(sock), (proxy.COMMIT, 0, b''))
+            ops.append(proxy.COMMIT)
+            reply(sock, proxy.COMMIT, struct.pack('<I', received))
+        with Peer(handler) as sock:
+            self.assertEqual(proxy.transfer(sock, self.package, info(), lambda *_: None), 'B')
+        self.assertEqual(ops.count(proxy.COMMIT), 1)
+        self.assertEqual(ops.count(proxy.DATA), 3)
+
+    def test_wrong_ack_stops_without_replay_or_commit(self):
+        def handler(sock):
+            op, _, _ = read_frame(sock)
+            reply(sock, op)
+            op, _, _ = read_frame(sock)
+            reply(sock, op, struct.pack('<I', 4095))
+            self.assertFalse(sock.recv(1), 'ACK错误后不应自动发送新命令')
+        with Peer(handler) as sock, self.assertRaisesRegex(ValueError, 'ACK'):
+            proxy.transfer(sock, self.package, info(), lambda *_: None)
+
+    def test_cancel_after_begin_ack_never_commits(self):
+        stop = threading.Event()
+        def handler(sock):
+            op, _, _ = read_frame(sock)
+            stop.set()
+            reply(sock, op)
+            self.assertEqual(read_frame(sock), (proxy.CANCEL, 0, b''))
+            reply(sock, proxy.CANCEL)
+        with Peer(handler) as sock, self.assertRaises(InterruptedError):
+            proxy.transfer(sock, self.package, info(), lambda *_: None, stop)
+
+    def test_status_errors_are_propagated(self):
+        for code in (14, 24, 25, 27, 31, 32, 100, 101, 102):
+            def handler(sock):
+                op, _, _ = read_frame(sock)
+                reply(sock, op, status=code)
+            with self.subTest(code=code), Peer(handler) as sock, self.assertRaises(proxy.ProxyError) as error:
+                proxy.request(sock, proxy.BEGIN)
+            self.assertEqual(error.exception.status, code)
+
+    def test_bad_crc_opcode_and_oversized_response_are_rejected(self):
+        cases = [tcp.frame(proxy.INFO | 0x80000000, 0, b'')[:-1] + b'\xff',
+                 tcp.frame(proxy.DATA | 0x80000000), tcp.frame(proxy.INFO | 0x80000000, 0, b'x' * 1001)]
+        for raw in cases:
+            def handler(sock):
+                read_frame(sock)
+                sock.sendall(raw)
+            with self.subTest(raw=raw[:20]), Peer(handler) as sock, self.assertRaises(ValueError):
+                proxy.request(sock, proxy.INFO)
+
+    def test_commit_ack_loss_is_not_canceled_or_replayed(self):
+        ops, committed = [], []
+        def handler(sock):
+            while True:
+                op, offset, body = read_frame(sock)
+                ops.append(op)
+                if op == proxy.COMMIT:
+                    return  # USB已提交，但电脑端没有收到ACK。
+                reply(sock, op, struct.pack('<I', offset + len(body)) if op == proxy.DATA else b'')
+        with Peer(handler) as sock:
+            self.assertEqual(proxy.transfer(sock, self.package, info(), lambda *_: None,
+                                           on_commit=lambda: committed.append(True)), 'B')
+        self.assertEqual(ops.count(proxy.COMMIT), 1)
+        self.assertNotIn(proxy.CANCEL, ops)
+        self.assertEqual(committed, [True])
+
+    def test_commit_env_error27_continues_readonly_health_without_replay(self):
+        """ENV可能部分生效：27不能当作撤销，只重连读取D133健康状态。"""
+        ops = []
+        def transfer_peer(sock):
+            op, _, _ = read_frame(sock)
+            ops.append(op)
+            self.assertEqual(op, proxy.INFO)
+            reply(sock, op, json.dumps(info()).encode())
+            while True:
+                op, offset, body = read_frame(sock)
+                ops.append(op)
+                if op == proxy.COMMIT:
+                    reply(sock, op, status=27)
+                    return
+                self.assertIn(op, (proxy.BEGIN, proxy.DATA))
+                reply(sock, op, struct.pack('<I', offset + len(body)) if op == proxy.DATA else b'')
+        def health_peer(sock):
+            op, offset, body = read_frame(sock)
+            ops.append(op)
+            self.assertEqual((op, offset, body), (proxy.HEALTH, 0, b''))
+            reply(sock, op, json.dumps(info(version='1.0.170', slot='B', next_slot='B')).encode())
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+            path = Path(folder) / 'ota.cpio'
+            path.write_bytes(self.package.data)
+            Path(str(path) + '.sig').write_bytes(self.package.signature)
+            with Peer(transfer_peer) as transfer_sock, Peer(health_peer) as health_sock:
+                with patch.object(proxy, 'connect', side_effect=[transfer_sock, health_sock]) as connect:
+                    result = proxy.upload(SimpleNamespace(host='127.0.0.1', port=5000), b'k' * 32,
+                                          path, lambda *_: None)
+                    self.assertEqual(result, '1.0.170')
+                    self.assertEqual(connect.call_count, 2)
+        self.assertEqual(ops.count(proxy.COMMIT), 1)
+        self.assertEqual(ops[-1], proxy.HEALTH)
+        self.assertNotIn(proxy.CANCEL, ops)
+
+    def test_health_requires_preselected_inactive_slot_and_confirmation(self):
+        states = [proxy.ProxyError(100), proxy.ProxyError(101), info(version='1.0.170'),
+                  info(version='1.0.170', slot='B', next_slot='B', confirmed=False),
+                  info(version='1.0.170', slot='B', next_slot='B')]
+        @contextmanager
+        def connection():
+            yield object()
+        with patch.object(proxy, 'device_info', side_effect=states), patch.object(proxy.time, 'sleep'):
+            self.assertEqual(proxy.monitor(connection, self.package, info(), 'B', lambda *_: None), '1.0.170')
+
+    def test_old_slot_after_reboot_window_is_not_success(self):
+        @contextmanager
+        def connection():
+            yield object()
+        with patch.object(proxy, 'device_info', return_value=info()), patch.object(proxy.time, 'monotonic', side_effect=[0, 1, 31]):
+            with self.assertRaisesRegex(RuntimeError, '原槽'):
+                proxy.monitor(connection, self.package, info(), 'B', lambda *_: None)
+
+    def test_stop_after_commit_does_not_send_cancel(self):
+        stop = threading.Event()
+        stop.set()
+        with self.assertRaisesRegex(InterruptedError, '不能撤销'):
+            proxy.monitor(lambda: self.fail('停止后不应重连'), self.package, info(), 'B', lambda *_: None, stop)
+
+    def test_upload_requires_existing_f750_key_before_connection(self):
+        with patch.object(proxy, 'connect') as connect:
+            with self.assertRaisesRegex(ValueError, 'Key'):
+                proxy.upload(SimpleNamespace(host='127.0.0.1', port=5000), b'', 'unused', lambda *_: None)
+            connect.assert_not_called()
+
+    def test_stop_ui_preserves_committed_semantics(self):
+        messages = []
+        app = SimpleNamespace(stop_event=threading.Event(), d133_proxy_committed=True,
+                              stop_button=SimpleNamespace(configure=lambda **_: None),
+                              d133_proxy_status_var=SimpleNamespace(set=messages.append),
+                              _append_log=messages.append, _set_status=messages.append)
+        ui.stop_operation(app)
+        self.assertTrue(app.stop_event.is_set())
+        self.assertIn('不能撤销', messages[0])
+
+
+if __name__ == '__main__':
+    unittest.main()

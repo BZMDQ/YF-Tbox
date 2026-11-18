@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         working-directory: Source
         run: |
-          python -m unittest test_connection_transport test_gui_connection_policy test_ota_window1 test_boot_update -v
+          python -m unittest test_connection_transport test_gui_connection_policy test_ota_window1 test_boot_update test_d133_proxy -v
           if ($LASTEXITCODE -ne 0) { throw 'Connection checks failed.' }
       - name: Build and check application
         id: build
@@ -79,7 +79,7 @@ jobs:
           body: |
             手动下载安装程序，安装完整工具箱应用运行文件及源码，不生成额外 ZIP。
             保留既有 CubeProgrammer、ST-LINK 驱动和用户配置；此公共包不分发厂商工具。
-            0.8.50：新增F750内部BOOT单份TCP更新入口，需配套系统1.4.43及匹配Key。先在RAM完整暂存校验，经明确确认后原址更新；断电可能需要ST-LINK恢复。保持系统OTA窗口1及原扫描逻辑。
+            0.8.51：新增D133经F750 USB A/B更新入口，需要F750 1.4.49、D133 1.0.169及匹配Key。固定4096字节/窗口1，D133屏幕确认后写非活动槽；重启后核对版本、目标槽和健康确认。保留D133 TCP直连与系统OTA窗口1。
             已完成主机连接策略和打包界面检查；实际开发板与公司网络的速度和长时间稳定性需现场验证。
             工具箱不会自动检查、下载或安装更新。
           files: |
