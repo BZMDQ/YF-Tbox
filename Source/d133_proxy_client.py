@@ -16,6 +16,7 @@ INFO, DATA, COMMIT, HEALTH, BEGIN, CANCEL = 0xD100, 0xD102, 0xD103, 0xD105, 0xD1
 LOGICAL_DATA = 0xD109
 LEGACY_CHUNK_SIZE = 4096
 LARGE_CHUNK_SIZE = 32768
+EXTENDED_CHUNK_SIZE = 65536
 LNET_MAX_PAYLOAD = 16384
 LARGE_CHUNK_WINDOW = 2
 REQUEST_TIMEOUT = 120
@@ -64,7 +65,7 @@ def load_package(path, signature_path=None):
 
 
 def _send_request(sock, op, offset, payload):
-    limit = LARGE_CHUNK_SIZE if op == LOGICAL_DATA else LEGACY_CHUNK_SIZE
+    limit = EXTENDED_CHUNK_SIZE if op == LOGICAL_DATA else LEGACY_CHUNK_SIZE
     if len(payload) > limit:
         raise ValueError(f'D133 USB请求不得超过{limit}字节')
     if op == LOGICAL_DATA:
@@ -146,12 +147,18 @@ def _ack(body, expected, operation):
         raise ValueError(f'{operation}累计偏移ACK不匹配；未重发写入命令')
 
 
-def _chunk_size(info):
-    # 只有 F750 与 D133 都明确报告整数 32768，才在本次更新使用大块。
+def _transfer_mode(info):
+    # 能力值须为严格 JSON 整数；扩展能力还须保留原有大块和窗口能力。
     limits = (info.get('relay_max_chunk'), info.get('usb_max_chunk'))
-    if all(type(limit) is int and limit == LARGE_CHUNK_SIZE for limit in limits):
-        return LARGE_CHUNK_SIZE
-    return LEGACY_CHUNK_SIZE
+    if any(type(limit) is not int or limit != LARGE_CHUNK_SIZE for limit in limits):
+        return LEGACY_CHUNK_SIZE, 1, 0
+    relay_window = info.get('relay_max_window')
+    if type(relay_window) is not int or relay_window != LARGE_CHUNK_WINDOW:
+        return LARGE_CHUNK_SIZE, 1, 0
+    extended_limits = (info.get('relay_max_chunk_v2'), info.get('usb_max_chunk_v2'))
+    if all(type(limit) is int and limit == EXTENDED_CHUNK_SIZE for limit in extended_limits):
+        return EXTENDED_CHUNK_SIZE, LARGE_CHUNK_WINDOW, 3
+    return LARGE_CHUNK_SIZE, LARGE_CHUNK_WINDOW, 2
 
 
 def transfer(sock, package, info, progress, cancel=None, on_commit=None):
@@ -160,11 +167,8 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
         raise ValueError('D133当前槽尚未健康确认，禁止开始下一次更新')
     _check_cancel(cancel)
     target = 'B' if info['slot'] == 'A' else 'A'
-    chunk_size = _chunk_size(info)
-    relay_window = info.get('relay_max_window')
-    window = (LARGE_CHUNK_WINDOW if chunk_size == LARGE_CHUNK_SIZE and
-              type(relay_window) is int and relay_window == LARGE_CHUNK_WINDOW else 1)
-    data_op = LOGICAL_DATA if chunk_size == LARGE_CHUNK_SIZE else DATA
+    chunk_size, window, begin_offset = _transfer_mode(info)
+    data_op = DATA if chunk_size == LEGACY_CHUNK_SIZE else LOGICAL_DATA
     total = len(package.data)
     metadata = struct.pack('<I32s32s32s32s', total, hashlib.sha256(package.data).digest(),
                            PRODUCT.encode(), HARDWARE.encode(), package.version.encode())
@@ -178,8 +182,8 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
         else:
             confirmation = f'等待D133屏幕确认写入槽{target}'
         progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{mode}；{confirmation}')
-        # BEGIN偏移2明确启用F750的双块缓存，窗口1继续使用原协议偏移0。
-        request(sock, BEGIN, offset=window if window > 1 else 0, payload=metadata + package.signature)
+        # BEGIN 偏移 3 选 64 KiB 双窗口，偏移 2 选 32 KiB 双窗口；窗口 1 用偏移 0。
+        request(sock, BEGIN, offset=begin_offset, payload=metadata + package.signature)
         last_progress = started = time.monotonic()
         while written < total:
             _check_cancel(cancel)

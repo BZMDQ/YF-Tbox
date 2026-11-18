@@ -16,7 +16,7 @@ if ([string]::IsNullOrWhiteSpace($WorkPath)) {
     $work = [IO.Path]::GetFullPath($WorkPath)
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $root '研发工具箱_0.8.54.exe'
+    $OutputPath = Join-Path $root '研发工具箱_0.8.55.exe'
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $dist = Split-Path -Parent $output
