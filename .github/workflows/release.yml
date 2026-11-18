@@ -28,7 +28,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check -r requirements-build.txt
           if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
-      - name: Check connections, D133 USB block negotiation, and cancellation
+      - name: Check connections, D133 USB window negotiation, and cancellation
         shell: pwsh
         working-directory: Source
         run: |
@@ -81,7 +81,7 @@ jobs:
           body: |
             手动下载安装程序，安装完整工具箱应用运行文件及源码，不生成额外 ZIP。
             保留既有 CubeProgrammer、ST-LINK 驱动和用户配置；此公共包不分发厂商工具。
-            0.8.53：从“03 无线烧录”进入 D133 USB A/B。F750 1.4.51 与 D133 1.0.171 协商后使用 32 KiB 逻辑块，每个块分成最多两帧，收到累计确认后再发下一块。旧版组合继续使用 4 KiB，最低兼容版本为 F750 1.4.49 与 D133 1.0.169。D133 1.0.170 起支持电脑端确认，旧版 D133 按屏幕提示确认。D133 校验签名并更新非活动槽，重启后核对版本、目标槽和健康确认。
+            0.8.54 从“03 无线烧录”进入 D133 USB A/B。F750 1.4.54 与 D133 1.0.171 协商后支持 32 KiB、窗口 2，每个逻辑块拆成最多两帧并逐块核对累计确认。仅支持大块的组合使用 32 KiB、窗口 1，其他兼容组合使用 4 KiB、窗口 1。最低兼容版本为 F750 1.4.49 与 D133 1.0.169。D133 1.0.170 起支持电脑端确认，旧版 D133 按屏幕提示确认。D133 校验签名并更新非活动槽，重启后核对版本、目标槽和健康确认。
             W78 / PIC24 HEX 从“03 无线烧录”进入，D133 TCP 直连从“04 固件升级”进入。
             已完成主机连接策略和打包界面检查；实际开发板与公司网络的速度和长时间稳定性需现场验证。
             工具箱不会自动检查、下载或安装更新。

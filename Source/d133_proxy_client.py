@@ -1,9 +1,10 @@
-"""D133经F750 USB的A/B更新；严格窗口1，写入命令均只发送一次。"""
+"""D133经F750 USB的A/B更新；按能力协商窗口，写入命令均只发送一次。"""
 from contextlib import closing
 from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import select
 import struct
 import time
 import zlib
@@ -16,6 +17,8 @@ LOGICAL_DATA = 0xD109
 LEGACY_CHUNK_SIZE = 4096
 LARGE_CHUNK_SIZE = 32768
 LNET_MAX_PAYLOAD = 16384
+LARGE_CHUNK_WINDOW = 2
+REQUEST_TIMEOUT = 120
 PROGRESS_INTERVAL = 0.2
 MAX_PACKAGE = 5248 * 1024 + 8192
 ERRORS = {1: '帧CRC错误', 3: 'D133或USB链路忙', 4: '参数、型号或硬件不匹配',
@@ -60,25 +63,50 @@ def load_package(path, signature_path=None):
     return Package(data, signature, version)
 
 
-def request(sock, op, offset=0, payload=b''):
-    """仅接收当前命令的有界应答；F750自动信息帧绝不能成为D133信息。"""
+def _send_request(sock, op, offset, payload):
     limit = LARGE_CHUNK_SIZE if op == LOGICAL_DATA else LEGACY_CHUNK_SIZE
     if len(payload) > limit:
         raise ValueError(f'D133 USB请求不得超过{limit}字节')
     if op == LOGICAL_DATA:
-        # 逻辑块内连续发送物理帧，全部送出后才等待一次累计应答。
+        # 逻辑块内连续发送物理帧，每个完整逻辑块只对应一次累计应答。
         if not payload:
             raise ValueError('D133 USB数据块不能为空')
         for part in range(0, len(payload), LNET_MAX_PAYLOAD):
             sock.sendall(frame(op, offset + part, payload[part:part + LNET_MAX_PAYLOAD]))
     else:
         sock.sendall(frame(op, offset, payload))
+
+
+def _read_pending(sock, count, deadline, cancel):
+    """在同一截止时间内读齐数据，半帧取消时由事务关闭连接。"""
+    data = bytearray()
+    while len(data) < count:
+        _check_cancel(cancel)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('等待D133 USB数据累计确认超时')
+        if not select.select([sock], [], [], min(.1, remaining))[0]:
+            continue
+        part = sock.recv(count - len(data))
+        if not part:
+            raise ConnectionError('设备已关闭连接')
+        data.extend(part)
+    return bytes(data)
+
+
+def _receive_response(sock, op, cancel=None):
+    """仅接收当前命令的有界应答，丢弃F750自动信息帧。"""
+    if cancel is None:
+        read = lambda count: exact(sock, count)
+    else:
+        deadline = time.monotonic() + (sock.gettimeout() or REQUEST_TIMEOUT)
+        read = lambda count: _read_pending(sock, count, deadline, cancel)
     while True:
-        header = exact(sock, HEADER.size)
+        header = read(HEADER.size)
         magic, response, status, size, crc = HEADER.unpack(header)
         if magic != b'LNET' or size > 1000:
             raise ValueError('D133代理响应头无效或长度超过1000字节')
-        body = exact(sock, size)
+        body = read(size)
         if zlib.crc32(body, zlib.crc32(header[:16])) & 0xffffffff != crc:
             raise ValueError('D133代理响应CRC错误')
         if response == 0x80000001 and status == 0:
@@ -88,6 +116,11 @@ def request(sock, op, offset=0, payload=b''):
         if status:
             raise ProxyError(status)
         return body
+
+
+def request(sock, op, offset=0, payload=b''):
+    _send_request(sock, op, offset, payload)
+    return _receive_response(sock, op)
 
 
 def device_info(sock, op=INFO):
@@ -122,37 +155,49 @@ def _chunk_size(info):
 
 
 def transfer(sock, package, info, progress, cancel=None, on_commit=None):
-    """按设备能力显示确认方式，取消只在当前响应完成后发送。"""
+    """逐块核对累计确认，全部确认后才允许提交。"""
     if not info['confirmed'] or info['slot'] != info['next_slot']:
         raise ValueError('D133当前槽尚未健康确认，禁止开始下一次更新')
     _check_cancel(cancel)
     target = 'B' if info['slot'] == 'A' else 'A'
     chunk_size = _chunk_size(info)
+    relay_window = info.get('relay_max_window')
+    window = (LARGE_CHUNK_WINDOW if chunk_size == LARGE_CHUNK_SIZE and
+              type(relay_window) is int and relay_window == LARGE_CHUNK_WINDOW else 1)
     data_op = LOGICAL_DATA if chunk_size == LARGE_CHUNK_SIZE else DATA
     total = len(package.data)
     metadata = struct.pack('<I32s32s32s32s', total, hashlib.sha256(package.data).digest(),
                            PRODUCT.encode(), HARDWARE.encode(), package.version.encode())
     committed = False
+    sent = written = 0
+    mode = f'数据块 {chunk_size // 1024} KiB，窗口 {window}'
     try:
         # 只有设备明确报告 JSON false 才免屏幕确认，旧固件缺少字段。
         if info.get('usb_screen_confirm') is False:
             confirmation = f'电脑端已确认，D133将校验签名并更新非活动槽{target}'
         else:
             confirmation = f'等待D133屏幕确认写入槽{target}'
-        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；数据块 {chunk_size // 1024} KiB；{confirmation}')
-        request(sock, BEGIN, payload=metadata + package.signature)
+        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{mode}；{confirmation}')
+        # BEGIN偏移2明确启用F750的双块缓存，窗口1继续使用原协议偏移0。
+        request(sock, BEGIN, offset=window if window > 1 else 0, payload=metadata + package.signature)
         last_progress = started = time.monotonic()
-        for offset in range(0, total, chunk_size):
+        while written < total:
             _check_cancel(cancel)
-            block = package.data[offset:offset + chunk_size]
-            written = offset + len(block)
-            _ack(request(sock, data_op, offset, block), written, 'DATA')
+            # 只用已核对的偏移释放窗口；收到一个ACK便补发下一块。
+            while sent < min(total, written + window * chunk_size):
+                _check_cancel(cancel)
+                offset = sent
+                sent = min(total, offset + chunk_size)
+                _send_request(sock, data_op, offset, package.data[offset:sent])
+            expected = min(written + chunk_size, total)
+            _ack(_receive_response(sock, data_op, cancel=cancel if window > 1 else None), expected, 'DATA')
+            written = expected
             # 速度按全链路累计ACK计时，节制界面刷新并始终显示最后一块。
             now = time.monotonic()
             if written == total or now - last_progress >= PROGRESS_INTERVAL:
                 elapsed = max(now - started, .001)
                 progress(written * 100 // total,
-                         f'写入非活动槽{target} {written:,}/{total:,} 字节；'
+                         f'{mode}；写入非活动槽{target} {written:,}/{total:,} 字节；'
                          f'{written / 1024 / elapsed:.1f} KiB/s')
                 last_progress = now
         _check_cancel(cancel)
@@ -172,10 +217,14 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
         return target
     except InterruptedError:
         if not committed:
-            try:
-                request(sock, CANCEL)
-            except Exception as exc:
-                progress(0, f'取消应答未确认：{exc}；没有发送提交，请检查D133状态')
+            if sent > written:
+                # 仍有未读的DATA ACK，断开由F750清理，避免把旧ACK当作取消应答。
+                sock.close()
+            else:
+                try:
+                    request(sock, CANCEL)
+                except Exception as exc:
+                    progress(0, f'取消应答未确认：{exc}；没有发送提交，请检查D133状态')
         raise
 
 
@@ -211,7 +260,7 @@ def upload(args, key, path, progress, cancel=None, on_commit=None, signature_pat
     def connection():
         # 沿用F750原认证与IPv4路由策略；认证信息帧始终属于F750。
         sock = connect(args, key, cancel=cancel, on_info=lambda _body: None)
-        sock.settimeout(120)
+        sock.settimeout(REQUEST_TIMEOUT)
         return closing(sock)
 
     with connection() as sock:

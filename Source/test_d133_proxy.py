@@ -190,10 +190,10 @@ class ProxyTests(unittest.TestCase):
         both_capable = info(version='1.0.171', relay_max_chunk=32768, usb_max_chunk=32768,
                             usb_screen_confirm=False)
         cases = (
-            (info(version='1.0.169', relay_max_chunk=32768), 4096, 9000, '等待D133屏幕确认'),
+            (info(version='1.0.169', relay_max_chunk=32768, relay_max_window=2), 4096, 9000, '等待D133屏幕确认'),
             (info(version='1.0.171', usb_max_chunk=32768, usb_screen_confirm=False), 4096, 9000, '电脑端已确认'),
             (both_capable, 32768, 34000, '电脑端已确认'),
-            (both_capable, 32768, 82000, '电脑端已确认'),
+            (dict(both_capable, relay_max_window=2.0), 32768, 82000, '电脑端已确认'),
         )
         for state, chunk_size, payload_size, confirmation in cases:
             package = proxy.Package(cpio(payload_size), b'signed', '1.0.170')
@@ -204,7 +204,7 @@ class ProxyTests(unittest.TestCase):
             def handler(sock):
                 self.assertEqual(read_frame(sock), (proxy.INFO, 0, b''))
                 # F750 的主动身份帧即使带能力字段，仍须丢弃。
-                reply(sock, 1, json.dumps({'relay_max_chunk': 32768}).encode())
+                reply(sock, 1, json.dumps({'relay_max_chunk': 32768, 'relay_max_window': 2}).encode())
                 reply(sock, proxy.INFO, json.dumps(state).encode())
                 op, offset, _ = read_frame(sock)
                 self.assertEqual((op, offset), (proxy.BEGIN, 0))
@@ -226,10 +226,88 @@ class ProxyTests(unittest.TestCase):
                 self.assertEqual(proxy.transfer(sock, package, proxy.device_info(sock), progress), 'B')
             messages = [call.args[1] for call in progress.call_args_list]
             self.assertIn(f'数据块 {chunk_size // 1024} KiB', messages[0])
+            self.assertIn('窗口 1', messages[0])
             self.assertIn(confirmation, messages[0])
             self.assertIn(f'{len(package.data):,}/{len(package.data):,} 字节', messages[-2])
             full, tail = divmod(len(package.data), frame_size)
             self.assertEqual(lengths, [frame_size] * full + ([tail] if tail else []))
+
+    def _read_logical_block(self, sock, package, offset):
+        end = min(offset + proxy.LARGE_CHUNK_SIZE, len(package.data))
+        for start in range(offset, end, proxy.LNET_MAX_PAYLOAD):
+            op, received, body = read_frame(sock, max_payload=proxy.LNET_MAX_PAYLOAD)
+            self.assertEqual((op, received), (proxy.LOGICAL_DATA, start))
+            self.assertEqual(body, package.data[start:min(start + proxy.LNET_MAX_PAYLOAD, end)])
+        return end
+
+    def test_d100_window2_sends_two_blocks_refills_on_one_ack_and_commits_last(self):
+        state = info(version='1.0.171', relay_max_chunk=32768, usb_max_chunk=32768, relay_max_window=2)
+        package = proxy.Package(cpio(payload_size=100000), b'signed', '1.0.171')
+        progress, committed = Mock(), Mock()
+
+        def handler(sock):
+            self.assertEqual(read_frame(sock), (proxy.INFO, 0, b''))
+            reply(sock, proxy.INFO, json.dumps(state).encode())
+            op, offset, _ = read_frame(sock)
+            self.assertEqual((op, offset), (proxy.BEGIN, 2))
+            reply(sock, op)
+            # 先完整收到两块，再按顺序逐块确认。只确认一块时就应补满窗口。
+            first = self._read_logical_block(sock, package, 0)
+            second = self._read_logical_block(sock, package, first)
+            self.assertFalse(select.select([sock], [], [], .02)[0], '第三块越过第一块ACK')
+            reply(sock, proxy.LOGICAL_DATA, struct.pack('<I', first))
+            third = self._read_logical_block(sock, package, second)
+            self.assertFalse(select.select([sock], [], [], .02)[0], '第四块越过第二块ACK')
+            reply(sock, proxy.LOGICAL_DATA, struct.pack('<I', second))
+            fourth = self._read_logical_block(sock, package, third)
+            self.assertEqual(fourth, len(package.data))
+            reply(sock, proxy.LOGICAL_DATA, struct.pack('<I', third))
+            self.assertFalse(select.select([sock], [], [], .02)[0], '提交越过最后一块ACK')
+            committed.assert_not_called()
+            reply(sock, proxy.LOGICAL_DATA, struct.pack('<I', fourth))
+            self.assertEqual(read_frame(sock), (proxy.COMMIT, 0, b''))
+            reply(sock, proxy.COMMIT, struct.pack('<I', fourth))
+
+        with Peer(handler) as sock:
+            self.assertEqual(proxy.transfer(sock, package, proxy.device_info(sock), progress,
+                                            on_commit=committed), 'B')
+        self.assertIn('数据块 32 KiB，窗口 2', progress.call_args_list[0].args[1])
+        committed.assert_called_once()
+
+    def test_window2_out_of_order_ack_and_device_error_stop_without_refill_or_commit(self):
+        state = info(relay_max_chunk=32768, usb_max_chunk=32768, relay_max_window=2)
+        package = proxy.Package(cpio(payload_size=82000), b'signed', '1.0.171')
+        for status in (0, 6):
+            def handler(sock):
+                op, offset, _ = read_frame(sock)
+                self.assertEqual((op, offset), (proxy.BEGIN, 2))
+                reply(sock, op)
+                first = self._read_logical_block(sock, package, 0)
+                second = self._read_logical_block(sock, package, first)
+                reply(sock, proxy.LOGICAL_DATA, struct.pack('<I', second) if status == 0 else b'', status=status)
+                self.assertFalse(sock.recv(1), '错误响应后不应补发、重放或提交')
+
+            error = ValueError if status == 0 else proxy.ProxyError
+            with self.subTest(status=status), Peer(handler) as sock, self.assertRaises(error):
+                proxy.transfer(sock, package, state, lambda *_: None)
+
+    def test_window2_cancel_closes_socket_with_ack_pending(self):
+        state = info(relay_max_chunk=32768, usb_max_chunk=32768, relay_max_window=2)
+        package = proxy.Package(cpio(payload_size=82000), b'signed', '1.0.171')
+        stop, committed = threading.Event(), Mock()
+
+        def handler(sock):
+            op, offset, _ = read_frame(sock)
+            self.assertEqual((op, offset), (proxy.BEGIN, 2))
+            reply(sock, op)
+            first = self._read_logical_block(sock, package, 0)
+            self._read_logical_block(sock, package, first)
+            stop.set()
+            self.assertFalse(sock.recv(1), '仍有未确认数据时应断开连接，不发送CANCEL或COMMIT')
+
+        with Peer(handler) as sock, self.assertRaisesRegex(InterruptedError, '非活动槽不会被激活'):
+            proxy.transfer(sock, package, state, lambda *_: None, stop, committed)
+        committed.assert_not_called()
 
     def test_large_chunks_require_both_exact_json_integers(self):
         for field in ('relay_max_chunk', 'usb_max_chunk'):
@@ -242,8 +320,10 @@ class ProxyTests(unittest.TestCase):
     def test_progress_throttles_intermediate_updates_and_always_reports_last_block(self):
         package = proxy.Package(b'x' * (4096 * 3), b'signed', '1.0.170')
         progress = Mock()
-        acks = [b'', *(struct.pack('<I', size) for size in (4096, 8192, 12288, 12288))]
-        with patch.object(proxy, 'request', side_effect=acks), \
+        acks = [struct.pack('<I', size) for size in (4096, 8192, 12288)]
+        with patch.object(proxy, 'request', side_effect=[b'', acks[-1]]), \
+                patch.object(proxy, '_send_request'), \
+                patch.object(proxy, '_receive_response', side_effect=acks), \
                 patch.object(proxy.time, 'monotonic', side_effect=[0, .05, .21, .26]):
             proxy.transfer(object(), package, info(), progress)
         updates = [call.args for call in progress.call_args_list]
