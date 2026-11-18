@@ -12,7 +12,11 @@ from d133_ota_client import PRODUCT, HARDWARE, validate_cpio
 from local_tcp_client import HEADER, connect, exact, frame
 
 INFO, DATA, COMMIT, HEALTH, BEGIN, CANCEL = 0xD100, 0xD102, 0xD103, 0xD105, 0xD106, 0xD107
-CHUNK_SIZE = 4096
+LOGICAL_DATA = 0xD109
+LEGACY_CHUNK_SIZE = 4096
+LARGE_CHUNK_SIZE = 32768
+LNET_MAX_PAYLOAD = 16384
+PROGRESS_INTERVAL = 0.2
 MAX_PACKAGE = 5248 * 1024 + 8192
 ERRORS = {1: '帧CRC错误', 3: 'D133或USB链路忙', 4: '参数、型号或硬件不匹配',
           6: '累计偏移错误', 9: '完整摘要错误',
@@ -58,9 +62,17 @@ def load_package(path, signature_path=None):
 
 def request(sock, op, offset=0, payload=b''):
     """仅接收当前命令的有界应答；F750自动信息帧绝不能成为D133信息。"""
-    if len(payload) > CHUNK_SIZE:
-        raise ValueError('D133 USB单帧不得超过4096字节')
-    sock.sendall(frame(op, offset, payload))
+    limit = LARGE_CHUNK_SIZE if op == LOGICAL_DATA else LEGACY_CHUNK_SIZE
+    if len(payload) > limit:
+        raise ValueError(f'D133 USB请求不得超过{limit}字节')
+    if op == LOGICAL_DATA:
+        # 逻辑块内连续发送物理帧，全部送出后才等待一次累计应答。
+        if not payload:
+            raise ValueError('D133 USB数据块不能为空')
+        for part in range(0, len(payload), LNET_MAX_PAYLOAD):
+            sock.sendall(frame(op, offset + part, payload[part:part + LNET_MAX_PAYLOAD]))
+    else:
+        sock.sendall(frame(op, offset, payload))
     while True:
         header = exact(sock, HEADER.size)
         magic, response, status, size, crc = HEADER.unpack(header)
@@ -101,13 +113,24 @@ def _ack(body, expected, operation):
         raise ValueError(f'{operation}累计偏移ACK不匹配；未重发写入命令')
 
 
+def _chunk_size(info):
+    # 只有 F750 与 D133 都明确报告整数 32768，才在本次更新使用大块。
+    limits = (info.get('relay_max_chunk'), info.get('usb_max_chunk'))
+    if all(type(limit) is int and limit == LARGE_CHUNK_SIZE for limit in limits):
+        return LARGE_CHUNK_SIZE
+    return LEGACY_CHUNK_SIZE
+
+
 def transfer(sock, package, info, progress, cancel=None, on_commit=None):
     """按设备能力显示确认方式，取消只在当前响应完成后发送。"""
     if not info['confirmed'] or info['slot'] != info['next_slot']:
         raise ValueError('D133当前槽尚未健康确认，禁止开始下一次更新')
     _check_cancel(cancel)
     target = 'B' if info['slot'] == 'A' else 'A'
-    metadata = struct.pack('<I32s32s32s32s', len(package.data), hashlib.sha256(package.data).digest(),
+    chunk_size = _chunk_size(info)
+    data_op = LOGICAL_DATA if chunk_size == LARGE_CHUNK_SIZE else DATA
+    total = len(package.data)
+    metadata = struct.pack('<I32s32s32s32s', total, hashlib.sha256(package.data).digest(),
                            PRODUCT.encode(), HARDWARE.encode(), package.version.encode())
     committed = False
     try:
@@ -116,17 +139,22 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
             confirmation = f'电脑端已确认，D133将校验签名并更新非活动槽{target}'
         else:
             confirmation = f'等待D133屏幕确认写入槽{target}'
-        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{confirmation}')
+        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；数据块 {chunk_size // 1024} KiB；{confirmation}')
         request(sock, BEGIN, payload=metadata + package.signature)
-        started = time.monotonic()
-        for offset in range(0, len(package.data), CHUNK_SIZE):
+        last_progress = started = time.monotonic()
+        for offset in range(0, total, chunk_size):
             _check_cancel(cancel)
-            block = package.data[offset:offset + CHUNK_SIZE]
-            _ack(request(sock, DATA, offset, block), offset + len(block), 'DATA')
-            elapsed = max(time.monotonic() - started, .001)
-            progress((offset + len(block)) * 100 // len(package.data),
-                     f'写入非活动槽{target} {offset + len(block):,}/{len(package.data):,} 字节；'
-                     f'{(offset + len(block)) / 1024 / elapsed:.1f} KiB/s')
+            block = package.data[offset:offset + chunk_size]
+            written = offset + len(block)
+            _ack(request(sock, data_op, offset, block), written, 'DATA')
+            # 速度按全链路累计ACK计时，节制界面刷新并始终显示最后一块。
+            now = time.monotonic()
+            if written == total or now - last_progress >= PROGRESS_INTERVAL:
+                elapsed = max(now - started, .001)
+                progress(written * 100 // total,
+                         f'写入非活动槽{target} {written:,}/{total:,} 字节；'
+                         f'{written / 1024 / elapsed:.1f} KiB/s')
+                last_progress = now
         _check_cancel(cancel)
         # 发送前即锁定提交状态；即使ACK丢失，也不得CANCEL或重放COMMIT。
         committed = True
@@ -134,7 +162,7 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
             on_commit()
         progress(100, '正在完整校验并提交；此后仅等待D133重启与健康确认，请勿断电')
         try:
-            _ack(request(sock, COMMIT), len(package.data), 'COMMIT')
+            _ack(request(sock, COMMIT), total, 'COMMIT')
         except ProxyError as exc:
             if exc.status not in (27, 100, 101, 102):
                 raise

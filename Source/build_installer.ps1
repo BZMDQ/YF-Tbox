@@ -12,7 +12,7 @@ if (-not $python) { $command = Get-Command python.exe -ErrorAction SilentlyConti
 $installerBits = & $python -c "import struct; print(struct.calcsize('P')*8)"
 if ($LASTEXITCODE -ne 0 -or $installerBits -ne '64') { throw 'Build this installer with 64-bit Python (TOOLBOX_PYTHON).' }
 if (-not $PayloadPath) { throw 'Specify -PayloadPath pointing to the prepared onedir payload ZIP.' }
-$installerVersion = '0.8.52'
+$installerVersion = '0.8.53'
 if (-not $OutputPath) { $OutputPath = Join-Path (Split-Path -Parent $source) "研发工具箱_${installerVersion}_安装程序.exe" }
 $PayloadPath = [IO.Path]::GetFullPath($PayloadPath)
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)

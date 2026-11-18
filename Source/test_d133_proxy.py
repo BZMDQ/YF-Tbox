@@ -24,7 +24,7 @@ def info(**changes):
     return value
 
 
-def cpio():
+def cpio(payload_size=9000):
     def member(name, body):
         # 官方crc CPIO头：13个8位十六进制字段。
         values = [0, 0o100644, 0, 0, 1, 0, len(body), 0, 0, 0, 0, len(name) + 1, sum(body) & 0xffffffff]
@@ -37,15 +37,15 @@ def cpio():
         text = b'\0'.join(x.encode() for x in ['[image]', f'size = "{total}";', 'version = "1.0.170";',
                                                 '[file]', 'ota_info.bin:file;', 'd13x_os.itb:os;']) + b'\0'
         data = member('ota_info.bin', b'\0' * 4 + text.ljust(508, b'\0'))
-        data += member('d13x_os.itb', b'x' * 9000) + member('TRAILER!!!', b'')
+        data += member('d13x_os.itb', b'x' * payload_size) + member('TRAILER!!!', b'')
         total = len(data)
     return data
 
 
-def read_frame(sock):
+def read_frame(sock, max_payload=4096):
     header = tcp.exact(sock, 20)
     magic, op, offset, size, crc = tcp.HEADER.unpack(header)
-    if magic != b'LNET' or size > 4096:
+    if magic != b'LNET' or size > max_payload:
         raise AssertionError('代理请求越界或错误magic')
     body = tcp.exact(sock, size)
     if zlib.crc32(body, zlib.crc32(header[:16])) & 0xffffffff != crc:
@@ -186,15 +186,86 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(ops.count(proxy.COMMIT), 1)
         self.assertEqual(ops.count(proxy.DATA), 3)
 
+    def test_d100_selects_chunk_size_and_preserves_window1(self):
+        both_capable = info(version='1.0.171', relay_max_chunk=32768, usb_max_chunk=32768,
+                            usb_screen_confirm=False)
+        cases = (
+            (info(version='1.0.169', relay_max_chunk=32768), 4096, 9000, '等待D133屏幕确认'),
+            (info(version='1.0.171', usb_max_chunk=32768, usb_screen_confirm=False), 4096, 9000, '电脑端已确认'),
+            (both_capable, 32768, 34000, '电脑端已确认'),
+            (both_capable, 32768, 82000, '电脑端已确认'),
+        )
+        for state, chunk_size, payload_size, confirmation in cases:
+            package = proxy.Package(cpio(payload_size), b'signed', '1.0.170')
+            frame_size = min(chunk_size, 16384)
+            data_op = proxy.DATA if chunk_size == 4096 else proxy.LOGICAL_DATA
+            lengths, progress = [], Mock()
+
+            def handler(sock):
+                self.assertEqual(read_frame(sock), (proxy.INFO, 0, b''))
+                # F750 的主动身份帧即使带能力字段，仍须丢弃。
+                reply(sock, 1, json.dumps({'relay_max_chunk': 32768}).encode())
+                reply(sock, proxy.INFO, json.dumps(state).encode())
+                op, offset, _ = read_frame(sock)
+                self.assertEqual((op, offset), (proxy.BEGIN, 0))
+                reply(sock, op)
+                for expected in range(0, len(package.data), chunk_size):
+                    end = min(expected + chunk_size, len(package.data))
+                    # 同一逻辑块先读齐所有物理帧，中间不给ACK。
+                    for start in range(expected, end, frame_size):
+                        op, offset, body = read_frame(sock, max_payload=frame_size)
+                        self.assertEqual((op, offset), (data_op, start))
+                        self.assertEqual(body, package.data[start:min(start + frame_size, end)])
+                        lengths.append(len(body))
+                    self.assertFalse(select.select([sock], [], [], .005)[0], '下一块越过当前ACK')
+                    reply(sock, data_op, struct.pack('<I', end))
+                self.assertEqual(read_frame(sock), (proxy.COMMIT, 0, b''))
+                reply(sock, proxy.COMMIT, struct.pack('<I', len(package.data)))
+
+            with self.subTest(state=state, payload_size=payload_size), Peer(handler) as sock:
+                self.assertEqual(proxy.transfer(sock, package, proxy.device_info(sock), progress), 'B')
+            messages = [call.args[1] for call in progress.call_args_list]
+            self.assertIn(f'数据块 {chunk_size // 1024} KiB', messages[0])
+            self.assertIn(confirmation, messages[0])
+            self.assertIn(f'{len(package.data):,}/{len(package.data):,} 字节', messages[-2])
+            full, tail = divmod(len(package.data), frame_size)
+            self.assertEqual(lengths, [frame_size] * full + ([tail] if tail else []))
+
+    def test_large_chunks_require_both_exact_json_integers(self):
+        for field in ('relay_max_chunk', 'usb_max_chunk'):
+            for invalid in (None, 32768.0, '32768', True, 4096, 16384, 65536):
+                with self.subTest(field=field, invalid=invalid):
+                    state = info(relay_max_chunk=32768, usb_max_chunk=32768)
+                    state[field] = invalid
+                    self.assertEqual(proxy._chunk_size(state), 4096)
+
+    def test_progress_throttles_intermediate_updates_and_always_reports_last_block(self):
+        package = proxy.Package(b'x' * (4096 * 3), b'signed', '1.0.170')
+        progress = Mock()
+        acks = [b'', *(struct.pack('<I', size) for size in (4096, 8192, 12288, 12288))]
+        with patch.object(proxy, 'request', side_effect=acks), \
+                patch.object(proxy.time, 'monotonic', side_effect=[0, .05, .21, .26]):
+            proxy.transfer(object(), package, info(), progress)
+        updates = [call.args for call in progress.call_args_list]
+        self.assertEqual([percent for percent, _ in updates], [0, 66, 100, 100])
+        self.assertIn('12,288/12,288 字节；46.2 KiB/s', updates[-2][1])
+
     def test_wrong_ack_stops_without_replay_or_commit(self):
-        def handler(sock):
-            op, _, _ = read_frame(sock)
-            reply(sock, op)
-            op, _, _ = read_frame(sock)
-            reply(sock, op, struct.pack('<I', 4095))
-            self.assertFalse(sock.recv(1), 'ACK错误后不应自动发送新命令')
-        with Peer(handler) as sock, self.assertRaisesRegex(ValueError, 'ACK'):
-            proxy.transfer(sock, self.package, info(), lambda *_: None)
+        package = proxy.Package(cpio(payload_size=34000), b'signed', '1.0.170')
+        cases = ((info(), 4096, proxy.DATA),
+                 (info(relay_max_chunk=32768, usb_max_chunk=32768), 32768, proxy.LOGICAL_DATA))
+        for state, chunk_size, data_op in cases:
+            def handler(sock):
+                op, _, _ = read_frame(sock)
+                reply(sock, op)
+                frame_size = min(chunk_size, 16384)
+                for start in range(0, chunk_size, frame_size):
+                    op, offset, body = read_frame(sock, max_payload=frame_size)
+                    self.assertEqual((op, offset, len(body)), (data_op, start, frame_size))
+                reply(sock, data_op, struct.pack('<I', chunk_size - 1))
+                self.assertFalse(sock.recv(1), 'ACK错误后不应重发、缩块或提交')
+            with self.subTest(chunk_size=chunk_size), Peer(handler) as sock, self.assertRaisesRegex(ValueError, 'ACK'):
+                proxy.transfer(sock, package, state, lambda *_: None)
 
     def test_cancel_after_begin_ack_never_commits(self):
         stop = threading.Event()
