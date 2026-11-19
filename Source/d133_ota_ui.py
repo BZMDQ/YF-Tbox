@@ -27,18 +27,22 @@ def install(gui):
         self._refresh_boot_controls()
     def build(self):
         original_build(self)
-        box=self.browse_button.master;card=box.master
+        box=self.ota_file_box;card=box.master
         row=gui.ctk.CTkFrame(card,fg_color='transparent');row.pack(fill='x',padx=18,pady=(5,10),before=box)
-        gui.ctk.CTkLabel(row,text='升级开发板').pack(side='left',padx=(0,10))
         self.ota_board_var=gui.tk.StringVar(master=self.root,value=STM32)
-        self.ota_board_selector=self._register_action(gui.ctk.CTkComboBox(row,variable=self.ota_board_var,values=[STM32,D133],state='readonly',width=235,command=lambda value:change(self,value)))
-        self.ota_board_selector.pack(side='left')
+        gui.ctk.CTkLabel(row,textvariable=self.ota_board_var,font=self._font(14,'bold')).pack(side='left')
+        section=self._action_section('ota')
+        first=section.pack_slaves()[0]
+        # 先选平台，随后选择设备与相应格式的升级包。
+        self._rail_label('ota', '升级平台').pack_configure(before=first)
+        self.ota_board_selector=self._register_action(gui.ctk.CTkComboBox(section,variable=self.ota_board_var,values=[STM32,D133],state='readonly',width=0,height=36,command=lambda value:change(self,value)))
+        self.ota_board_selector.pack(fill='x',padx=4,pady=(0,6),before=first)
         gui.ctk.CTkLabel(row,text='D133 TCP 端口').pack(side='left',padx=(15,6))
         self.d133_port_var=gui.tk.StringVar(master=self.root,value='5000')
         self.d133_port_entry=self._register_action(gui.ctk.CTkEntry(row,textvariable=self.d133_port_var,width=80,state='disabled'));self.d133_port_entry.pack(side='left')
         labels=[w for w in card.winfo_children() if isinstance(w,gui.ctk.CTkLabel)]
         self.ota_selection_note=labels[-1] if labels else None
-        self.d133_ota_note=gui.ctk.CTkLabel(card,text='系统信息与 OTA 共用 TCP 5000；升级需要 RSA 签名及开发板触屏确认。',font=self._font(9),text_color=gui.COLORS['muted'],anchor='w')
+        self.d133_ota_note=self._flow_label(card,text='系统信息与 OTA 共用 TCP 5000；升级需要 RSA 签名及开发板触屏确认。',font=self._font(9),text_color=gui.COLORS['muted'],anchor='w')
         self.d133_ota_note.pack_forget()
         change(self,self.ota_board_var.get())
     def set_package(self,path):

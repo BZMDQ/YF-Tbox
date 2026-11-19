@@ -15,9 +15,9 @@ def initialize(app, gui):
 
 def build_card(app, gui, page, row):
     card = app._page_card(page, row)
-    gui.ctk.CTkLabel(card, text='D133 · 经F750 USB更新A/B系统槽', font=app._font(18, 'bold'),
+    app._flow_label(card, text='D133 · 经F750 USB更新A/B系统槽', font=app._font(18, 'bold'),
                      anchor='w', wraplength=680).pack(fill='x', padx=18, pady=(16, 8))
-    gui.ctk.CTkLabel(card, text='使用当前F750的IP、TCP端口及配套Key认证。CPIO由F750经USB转交D133。D133 1.0.170起在电脑端确认即可，旧固件仍需在D133屏幕确认。',
+    app._flow_label(card, text='使用当前F750的IP、TCP端口及配套Key认证。CPIO由F750经USB转交D133。D133 1.0.170起在电脑端确认即可，旧固件仍需在D133屏幕确认。',
                      anchor='w', justify='left', wraplength=680,
                      text_color=gui.COLORS['muted']).pack(fill='x', padx=18, pady=(0, 12))
     target = gui.ctk.CTkFrame(card, fg_color='transparent')
@@ -27,20 +27,20 @@ def build_card(app, gui, page, row):
     app._new_entry(target, app.host_var, width=210).grid(row=0, column=1, sticky='ew')
     gui.ctk.CTkLabel(target, text='TCP端口').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(8, 0))
     app._new_entry(target, app.port_var, width=90).grid(row=1, column=1, sticky='w', pady=(8, 0))
-    gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_file_var, anchor='w', justify='left',
+    app._flow_label(card, textvariable=app.d133_proxy_file_var, anchor='w', justify='left',
                      wraplength=680, font=app._font(12, 'bold')).pack(fill='x', padx=18, pady=(0, 6))
-    gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_detail_var, anchor='w', justify='left',
+    app._flow_label(card, textvariable=app.d133_proxy_detail_var, anchor='w', justify='left',
                      wraplength=680, text_color=gui.COLORS['cyan']).pack(fill='x', padx=18, pady=(0, 12))
-    # 两行按钮适应最小窗口，避免中文按钮及签名说明发生遮挡。
-    app._secondary_button(card, '选择D133 CPIO及同名.sig…', lambda: choose_package(app), width=270).pack(anchor='w', padx=18, pady=(0, 10))
-    app._primary_button(card, '经F750 USB更新D133…', lambda: start_update(app), width=270).pack(anchor='w', padx=18, pady=(0, 14))
-    gui.ctk.CTkLabel(card, text='块大小与窗口由设备自动协商。支持扩展模式时每块64 KiB，最多两块在途。兼容组合使用32 KiB或4 KiB，进度区显示实际模式。D133校验签名并更新非活动槽。\n提交后停止按钮只停止电脑等待。请保持F750与D133供电及USB连接。',
+    app._rail_label('w78:d133', 'D133 升级包')
+    app.d133_proxy_browse_button = app._rail_button('w78:d133', '选择 CPIO 和签名…', lambda: choose_package(app))
+    app.d133_proxy_start_button = app._rail_button('w78:d133', '通过 USB 更新 D133…', lambda: start_update(app), 'teal')
+    app._flow_label(card, text='块大小与窗口由设备自动协商。支持扩展模式时每块64 KiB，最多两块在途。兼容组合使用32 KiB或4 KiB，进度区显示实际模式。D133校验签名并更新非活动槽。\n提交后停止按钮只停止电脑等待。请保持F750与D133供电及USB连接。',
                      wraplength=680, anchor='w', justify='left',
                      text_color=gui.COLORS['warning_text']).pack(fill='x', padx=18, pady=(0, 14))
     app.d133_proxy_progress = gui.ctk.CTkProgressBar(card)
     app.d133_proxy_progress.pack(fill='x', padx=18, pady=(0, 10))
     app.d133_proxy_progress.set(0)
-    gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_status_var, anchor='w', justify='left',
+    app._flow_label(card, textvariable=app.d133_proxy_status_var, anchor='w', justify='left',
                      wraplength=680).pack(fill='x', padx=18, pady=(0, 18))
     return card
 

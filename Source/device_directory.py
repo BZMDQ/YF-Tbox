@@ -430,9 +430,10 @@ def install(gui):
 
     def named_selector(app, parent, kind):
         row = ctk.CTkFrame(parent, fg_color='transparent')
-        row.pack(fill='x', padx=18, pady=(0, 10))
-        row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(row, text='选择设备' if kind == 'w78' else '选择设备加入升级列表').grid(row=0, column=0, padx=(0, 10))
+        row.pack(fill='x', padx=4, pady=(0, 6))
+        row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(row, text='选择设备' if kind == 'w78' else '从已保存设备添加',
+                     anchor='w').grid(row=0, column=0, sticky='ew')
         def choose(value):
             if app.is_running:
                 return
@@ -448,9 +449,9 @@ def install(gui):
             app._refresh_device_choices()
         choices = labels(app)
         combo = app._register_action(ctk.CTkComboBox(row, values=[label for _, label in choices] or ['尚未添加设备'],
-                                                    command=choose, state='readonly', height=34))
+                                                    command=choose, state='readonly', height=34, width=0))
         combo._toolbox_user_data = True
-        combo.grid(row=0, column=1, sticky='ew')
+        combo.grid(row=1, column=0, sticky='ew')
         app.named_device_selectors[kind] = combo
         app._refresh_device_choices()
 
@@ -501,16 +502,19 @@ def install(gui):
         row = ctk.CTkFrame(card, fg_color='transparent')
         row.grid(row=1, column=0, sticky='ew', padx=17, pady=(3, 10))
         row.grid_columnconfigure(0, weight=1)
-        app.device_combo = ctk.CTkComboBox(row, values=['尚未添加设备'],
-                                         command=app._select_named_device, height=34)
+        controls = app._action_section('home')
+        app.device_combo = app._register_action(ctk.CTkComboBox(
+            controls, values=['尚未添加设备'], command=app._select_named_device, height=36, width=0))
         app.device_combo._toolbox_user_data = True
-        app.device_combo.grid(row=0, column=0, sticky='ew')
-        app.device_scan_button = app._secondary_button(row, '刷新寻找设备', app._discover_devices, width=126)
-        app.device_scan_button.grid(row=0, column=1, padx=(8, 0))
+        app.device_combo.pack(fill='x', padx=4, pady=(0, 6), before=app.info_button)
+        app.device_scan_button = app._rail_button('home', '刷新寻找设备', app._discover_devices)
+        add_button = app._rail_button('home', '添加或管理设备', lambda: app._show_page('devices'))
+        # 设备与密钥操作各自归组。
+        for button in (app.device_scan_button, add_button):
+            button.pack_configure(before=app.home_key_group)
         app.device_current_label_var = tk.StringVar(master=app.root, value='输入或选择设备 IP')
-        ctk.CTkLabel(row, textvariable=app.device_current_label_var, anchor='w',
-                     text_color=gui.COLORS['cyan']).grid(row=1, column=0, columnspan=2,
-                                                         sticky='ew', pady=(5, 0))
+        app._flow_label(row, textvariable=app.device_current_label_var, anchor='w',
+                        text_color=gui.COLORS['cyan']).grid(row=0, column=0, sticky='ew')
         app._refresh_device_choices()
         app.host_var.trace_add('write', lambda *_: app._refresh_device_choices())
 
@@ -529,15 +533,15 @@ def install(gui):
         app.device_ip_entry = ip_entry
         app.device_name_entry = name_entry
         name_entry.grid(row=0, column=1, sticky='ew', padx=(0, 8))
-        add_button = app._secondary_button(form, '添加到列表', lambda owner=app: add(owner), width=100)
-        add_button.grid(row=0, column=2)
+        app._rail_label('devices', '设备列表')
+        app.device_add_button = app._rail_button('devices', '添加到列表', lambda: add(app), 'blue')
         ip_entry.bind('<Return>', lambda _event, owner=app: (add(owner), 'break')[1])
         name_entry.bind('<Return>', lambda _event, owner=app: (add(owner), 'break')[1])
         app.device_add_status_var = tk.StringVar(master=app.root, value='')
         ctk.CTkLabel(card, text='设备名称写入开发板后，可在互联设备中同步显示。', font=app._font(12),
                      text_color=gui.COLORS['muted']).grid(row=2, column=0, sticky='w', padx=16, pady=(0, 5))
-        ctk.CTkLabel(card, textvariable=app.device_add_status_var, font=app._font(12),
-                     text_color=gui.COLORS['blue']).grid(row=3, column=0, sticky='w', padx=16, pady=(0, 10))
+        app._flow_label(card, textvariable=app.device_add_status_var, font=app._font(12),
+                        text_color=gui.COLORS['blue']).grid(row=3, column=0, sticky='w', padx=16, pady=(0, 10))
         app.device_rows = ctk.CTkFrame(page, fg_color='transparent')
         app.device_rows.grid(row=1, column=0, sticky='ew')
         app._render_device_rows()
@@ -554,24 +558,25 @@ def install(gui):
             row = ctk.CTkFrame(app.device_rows, fg_color=gui.COLORS['card'], corner_radius=10,
                                 border_width=1, border_color=gui.COLORS['border'])
             row.pack(fill='x', pady=4)
-            row.grid_columnconfigure(1, weight=1)
-            ctk.CTkLabel(row, text=label, width=178, anchor='w', font=app._font(14, 'bold'),
-                         text_color=gui.COLORS['text']).grid(row=0, column=0, padx=12, pady=10)
+            row.grid_columnconfigure(0, weight=1)
+            app._flow_label(row, text=label, anchor='w', font=app._font(14, 'bold'),
+                            text_color=gui.COLORS['text']).grid(row=0, column=0, columnspan=5,
+                                                               sticky='ew', padx=12, pady=(8, 0))
             variable = tk.StringVar(master=app.root, value=app.device_name_drafts.get(ip, app.device_names.get(ip, '')))
             entry = ctk.CTkEntry(row, textvariable=variable, placeholder_text='设备名称', height=40,
                                  corner_radius=8, border_color=gui.COLORS['border'],
                                  fg_color=gui.COLORS['input'], text_color=gui.COLORS['text'],
                                  font=app._font(14))
-            entry.grid(row=0, column=1, sticky='ew', padx=8, pady=8)
+            entry.grid(row=1, column=0, columnspan=2, sticky='ew', padx=8, pady=8)
             def changed(*_, address=ip, var=variable):
                 app.device_name_drafts[address] = var.get()
             variable.trace_add('write', changed)
             ctk.CTkButton(row, text='选择', command=lambda address=ip: app._select_named_device(address),
                           width=72, height=38, corner_radius=8, fg_color=gui.COLORS['soft'],
-                          hover_color=gui.COLORS['border'], text_color=gui.COLORS['text']).grid(row=0, column=2, padx=3)
+                          hover_color=gui.COLORS['border'], text_color=gui.COLORS['text']).grid(row=1, column=2, padx=3)
             ctk.CTkButton(row, text='发送名称', command=lambda address=ip, var=variable: app._sync_device_name(address, var.get().strip()),
                           width=96, height=38, corner_radius=8, fg_color=gui.COLORS['blue'],
-                          hover_color=gui.COLORS['blue_hover'], text_color='#FFFFFF').grid(row=0, column=3, padx=3)
+                          hover_color=gui.COLORS['blue_hover'], text_color='#FFFFFF').grid(row=1, column=3, padx=3)
             def remove(address=ip):
                 app.device_name_drafts.pop(address, None)
                 app.device_names.pop(address, None)
@@ -582,9 +587,11 @@ def install(gui):
                 app._render_device_rows()
             ctk.CTkButton(row, text='删除', command=remove, width=68, height=38, corner_radius=8,
                           fg_color=gui.COLORS['error_bg'], hover_color='#FFD6D7',
-                          text_color=gui.COLORS['error_text']).grid(row=0, column=4, padx=(3, 10))
+                          text_color=gui.COLORS['error_text']).grid(row=1, column=4, padx=(3, 10))
 
     def add(app):
+        if app.is_running:
+            return
         raw_ip = app.device_ip_entry.get()
         try:
             ip = normalize_ipv4(raw_ip)
