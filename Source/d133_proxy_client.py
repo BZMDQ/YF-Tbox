@@ -17,6 +17,7 @@ LOGICAL_DATA = 0xD109
 LEGACY_CHUNK_SIZE = 4096
 LARGE_CHUNK_SIZE = 32768
 EXTENDED_CHUNK_SIZE = 65536
+MAX_LOGICAL_CHUNK_SIZE = 131072
 LNET_MAX_PAYLOAD = 16384
 LARGE_CHUNK_WINDOW = 2
 REQUEST_TIMEOUT = 120
@@ -65,7 +66,7 @@ def load_package(path, signature_path=None):
 
 
 def _send_request(sock, op, offset, payload):
-    limit = EXTENDED_CHUNK_SIZE if op == LOGICAL_DATA else LEGACY_CHUNK_SIZE
+    limit = MAX_LOGICAL_CHUNK_SIZE if op == LOGICAL_DATA else LEGACY_CHUNK_SIZE
     if len(payload) > limit:
         raise ValueError(f'D133 USB请求不得超过{limit}字节')
     if op == LOGICAL_DATA:
@@ -157,6 +158,9 @@ def _transfer_mode(info):
         return LARGE_CHUNK_SIZE, 1, 0
     extended_limits = (info.get('relay_max_chunk_v2'), info.get('usb_max_chunk_v2'))
     if all(type(limit) is int and limit == EXTENDED_CHUNK_SIZE for limit in extended_limits):
+        limits_v3 = (info.get('relay_max_chunk_v3'), info.get('usb_max_chunk_v3'))
+        if all(type(limit) is int and limit == MAX_LOGICAL_CHUNK_SIZE for limit in limits_v3):
+            return MAX_LOGICAL_CHUNK_SIZE, LARGE_CHUNK_WINDOW, 4
         return EXTENDED_CHUNK_SIZE, LARGE_CHUNK_WINDOW, 3
     return LARGE_CHUNK_SIZE, LARGE_CHUNK_WINDOW, 2
 
@@ -182,7 +186,7 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
         else:
             confirmation = f'等待D133屏幕确认写入槽{target}'
         progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{mode}；{confirmation}')
-        # BEGIN 偏移 3 选 64 KiB 双窗口，偏移 2 选 32 KiB 双窗口；窗口 1 用偏移 0。
+        # BEGIN 偏移 2/3/4 分别选 32/64/128 KiB 双窗口；窗口 1 用偏移 0。
         request(sock, BEGIN, offset=begin_offset, payload=metadata + package.signature)
         last_progress = started = time.monotonic()
         while written < total:

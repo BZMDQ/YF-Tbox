@@ -34,7 +34,7 @@ def build_card(app, gui, page, row):
     # 两行按钮适应最小窗口，避免中文按钮及签名说明发生遮挡。
     app._secondary_button(card, '选择D133 CPIO及同名.sig…', lambda: choose_package(app), width=270).pack(anchor='w', padx=18, pady=(0, 10))
     app._primary_button(card, '经F750 USB更新D133…', lambda: start_update(app), width=270).pack(anchor='w', padx=18, pady=(0, 14))
-    gui.ctk.CTkLabel(card, text='块大小与窗口由设备自动协商。支持扩展模式时每块64 KiB，最多两块在途。兼容组合使用32 KiB或4 KiB，进度区显示实际模式。D133校验签名并更新非活动槽。\n提交后停止按钮只停止电脑等待。请保持F750与D133供电及USB连接。',
+    gui.ctk.CTkLabel(card, text='块大小与窗口由设备自动协商。三端支持且 F750 使用被动接收时，每块 128 KiB、窗口 2。旧设备仍可协商 64、32 或 4 KiB，进度区显示实际模式。D133校验签名并更新非活动槽。\n提交后停止按钮只停止电脑等待。请保持F750与D133供电及USB连接。',
                      wraplength=680, anchor='w', justify='left',
                      text_color=gui.COLORS['warning_text']).pack(fill='x', padx=18, pady=(0, 14))
     app.d133_proxy_progress = gui.ctk.CTkProgressBar(card)
