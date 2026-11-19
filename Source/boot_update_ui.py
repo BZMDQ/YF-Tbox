@@ -38,9 +38,9 @@ def build_page(app, gui):
     page = app._page('boot')
     page.grid_columnconfigure(0, weight=1)
     card = app._page_card(page, 0)
-    app._flow_label(card, text='STM32F750 · 单份内部 BOOT', font=app._font(18, 'bold'),
+    gui.ctk.CTkLabel(card, text='STM32F750 · 单份内部 BOOT', font=app._font(18, 'bold'),
                      text_color=gui.COLORS['text']).pack(anchor='w', padx=18, pady=(16, 8))
-    app._flow_label(card, text='先通过系统 OTA 安装 1.4.43 或更新版本，之后才支持此入口。仅更新当前一台设备，必须使用配套 Key。',
+    gui.ctk.CTkLabel(card, text='先通过系统 OTA 安装 1.4.43 或更新版本，之后才支持此入口。仅更新当前一台设备，必须使用配套 Key。',
                      wraplength=760, justify='left', text_color=gui.COLORS['muted']).pack(fill='x', padx=18, pady=(0, 12))
     target = gui.ctk.CTkFrame(card, fg_color='transparent')
     target.pack(fill='x', padx=18, pady=(0, 12))
@@ -48,19 +48,22 @@ def build_page(app, gui):
     app._new_entry(target, app.host_var, width=230).pack(side='left')
     gui.ctk.CTkLabel(target, text='TCP端口').pack(side='left', padx=(18, 8))
     app._new_entry(target, app.port_var, width=85).pack(side='left')
-    app._flow_label(card, textvariable=app.boot_file_var, anchor='w', wraplength=760,
+    gui.ctk.CTkLabel(card, textvariable=app.boot_file_var, anchor='w', wraplength=760,
                      font=app._font(12, 'bold')).pack(fill='x', padx=18, pady=(0, 5))
-    app._flow_label(card, textvariable=app.boot_detail_var, anchor='w', justify='left',
+    gui.ctk.CTkLabel(card, textvariable=app.boot_detail_var, anchor='w', justify='left',
                      wraplength=760, text_color=gui.COLORS['cyan']).pack(fill='x', padx=18, pady=(0, 12))
-    app._rail_label('boot', '内部 BOOT 镜像')
-    app.boot_browse_button = app._rail_button('boot', '选择 BOOT 镜像…', app._choose_boot_image)
-    app.boot_start_button = app._rail_button('boot', '核验并暂存镜像…', app._start_boot_update, 'orange')
-    app._flow_label(card, text='⚠ 原址更新 0x08000000..0x0800FFFF，只有一份 BOOT，没有回滚副本。\n开始擦除后断电可能无法启动，需要 ST-LINK 恢复。请保持稳定供电。',
+    row = gui.ctk.CTkFrame(card, fg_color='transparent')
+    row.pack(fill='x', padx=18, pady=(0, 14))
+    app.boot_browse_button = app._secondary_button(row, '选择 BOOT HEX / boot.bin…', app._choose_boot_image, width=255)
+    app.boot_browse_button.pack(side='left')
+    app.boot_start_button = app._primary_button(row, '核验并暂存镜像…', app._start_boot_update, width=210, accent='orange')
+    app.boot_start_button.pack(side='right')
+    gui.ctk.CTkLabel(card, text='⚠ 原址更新 0x08000000..0x0800FFFF，只有一份 BOOT，没有回滚副本。\n开始擦除后断电可能无法启动，需要 ST-LINK 恢复。请保持稳定供电。',
                      wraplength=760, justify='left', text_color=gui.COLORS['error_text'],
                      font=app._font(12, 'bold')).pack(fill='x', padx=18, pady=(0, 14))
     app.boot_progress = gui.ctk.CTkProgressBar(card, progress_color=gui.COLORS['orange'])
     app.boot_progress.pack(fill='x', padx=18, pady=(0, 10)); app.boot_progress.set(0)
-    app._flow_label(card, textvariable=app.boot_status_var, wraplength=760, justify='left',
+    gui.ctk.CTkLabel(card, textvariable=app.boot_status_var, wraplength=760, justify='left',
                      anchor='w').pack(fill='x', padx=18, pady=(0, 18))
     refresh_controls(app)
 

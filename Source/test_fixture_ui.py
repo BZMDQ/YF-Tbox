@@ -96,19 +96,14 @@ def install(gui):
                 app.fixture_generation = None
                 app.fixture_status_var.set('已选择设备，请读取参数 | 硬件未接入')
 
-        app._rail_label('fixture', '目标设备')
         app.fixture_device_combo = app._register_action(ctk.CTkComboBox(
-            app._action_section('fixture'), values=['请先添加设备'], command=select,
-            state='readonly', height=36, width=0))
+            connect, values=['请先在总览添加设备'], command=select, state='readonly', height=34))
         app.fixture_device_combo._toolbox_user_data = True
-        app.fixture_device_combo.pack(fill='x', padx=4, pady=(0, 6))
-        ctk.CTkLabel(connect, text='当前设备 IP', text_color=gui.COLORS['muted']).grid(
-            row=0, column=0, sticky='w')
+        app.fixture_device_combo.grid(row=0, column=0, sticky='ew', padx=(0, 8))
         entry = app._register_action(ctk.CTkEntry(connect, textvariable=app.fixture_host_var, width=160, height=34))
         entry._toolbox_user_data = True
         entry.grid(row=0, column=1, padx=(0, 8))
-        app._rail_label('fixture', '测试用具参数')
-        app._rail_button('fixture', '读取参数 / 测量', app._fixture_read)
+        app._secondary_button(connect, '读取参数/测量', app._fixture_read, width=136).grid(row=0, column=2)
         tabs = ctk.CTkTabview(card, height=352, fg_color=gui.COLORS['soft'])
         tabs.grid(row=2, column=0, sticky='ew', padx=16, pady=(0, 8))
         settings = tabs.add('参数设定')
@@ -124,7 +119,7 @@ def install(gui):
                 ('value', '0'), ('minimum', '0'), ('maximum', ''), ('step', '1' if name == 'ILED' else '0.1'))}
             fields['range_enabled'] = tk.BooleanVar(master=app.root, value=False)
             for column, key in enumerate(['value', 'minimum', 'maximum', 'step'], 1):
-                entry = app._register_action(ctk.CTkEntry(settings, textvariable=fields[key], width=54, height=30))
+                entry = app._register_action(ctk.CTkEntry(settings, textvariable=fields[key], width=100, height=30))
                 entry._toolbox_user_data = True
                 entry.grid(row=index + 1, column=column, sticky='ew', padx=4, pady=3)
             app._register_action(ctk.CTkCheckBox(settings, text='', variable=fields['range_enabled'], width=38)).grid(
@@ -146,9 +141,9 @@ def install(gui):
             row=3, column=0, sticky='ew', padx=16, pady=(0, 4))
         actions = ctk.CTkFrame(card, fg_color='transparent')
         actions.grid(row=4, column=0, sticky='ew', padx=16, pady=(0, 12))
-        app._flow_label(actions, text='参数暂存于开发板；重启后复位。输出与测量接口尚未接入。',
-                        text_color=gui.COLORS['muted']).pack(fill='x')
-        app._rail_button('fixture', '发送界面参数', app._fixture_send, 'blue')
+        ctk.CTkLabel(actions, text='参数暂存于开发板；重启后复位。输出与测量接口尚未接入。',
+                     text_color=gui.COLORS['muted']).pack(side='left')
+        app._primary_button(actions, '发送界面参数', app._fixture_send, width=150).pack(side='right')
         refresh_devices(app)
 
     def accept(app, value):

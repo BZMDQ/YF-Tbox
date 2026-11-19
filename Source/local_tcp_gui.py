@@ -41,7 +41,7 @@ import d133_proxy_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.56'
+APP_VERSION = '0.8.55'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1075,7 +1075,7 @@ class LocalTcpApp:
         self.root.title(f'{APP_TITLE} | {APP_VERSION}')
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        width = min(1280, max(980, screen_width - 20))
+        width = min(1180, max(980, screen_width - 20))
         height = min(860, max(690, screen_height - 40))
         self.root.geometry(f'{width}x{height}')
         self.root.minsize(min(width, 980), min(height, 690))
@@ -1086,7 +1086,7 @@ class LocalTcpApp:
         shell.grid_columnconfigure(1, weight=1)
         shell.grid_rowconfigure(0, weight=1)
 
-        sidebar = ctk.CTkFrame(shell, width=184, fg_color=COLORS['sidebar'],
+        sidebar = ctk.CTkFrame(shell, width=210, fg_color=COLORS['sidebar'],
                                corner_radius=14, border_width=1,
                                border_color=COLORS['border'])
         sidebar.grid(row=0, column=0, sticky='nsw', padx=(0, 16))
@@ -1099,9 +1099,9 @@ class LocalTcpApp:
         brand.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(brand, image=self.logo_image, text='').grid(
             row=0, column=0, sticky='w', padx=(0, 10))
-        ctk.CTkLabel(brand, text='研发工具箱', font=self._font(14, 'bold'),
+        ctk.CTkLabel(brand, text='研发工具箱', font=self._font(16, 'bold'),
                      text_color=COLORS['text']).grid(row=0, column=1, sticky='w')
-        ctk.CTkLabel(sidebar, text='功能导航', font=self._font(11, 'bold'),
+        ctk.CTkLabel(sidebar, text='工作台', font=self._font(10, 'bold'),
                      text_color=COLORS['muted']).grid(row=1, column=0, sticky='w', padx=20, pady=(0, 9))
 
         self.nav_buttons = {}
@@ -1130,14 +1130,14 @@ class LocalTcpApp:
                      text_color=COLORS['muted']).pack(anchor='w', padx=12, pady=(11, 3))
         ctk.CTkLabel(side_info, textvariable=self.connection_summary_var,
                      font=self._font(12, 'bold'), text_color=COLORS['text'],
-                     anchor='w', wraplength=138, justify='left').pack(anchor='w', padx=12)
+                     anchor='w', wraplength=170, justify='left').pack(anchor='w', padx=12)
         self.connection_state_label = ctk.CTkLabel(
             side_info, textvariable=self.connection_state_var,
             font=self._font(9, 'bold'), text_color=COLORS['muted'], anchor='w')
         self.connection_state_label.pack(anchor='w', padx=12, pady=(2, 0))
         ctk.CTkLabel(side_info, textvariable=self.key_summary_var,
                      font=self._font(10), text_color=COLORS['cyan'],
-                     anchor='w', wraplength=138, justify='left').pack(anchor='w', padx=12, pady=(2, 10))
+                     anchor='w').pack(anchor='w', padx=12, pady=(2, 10))
         footer = ctk.CTkFrame(sidebar, fg_color='transparent')
         footer.grid(row=11, column=0, sticky='ew', padx=13, pady=(0, 10))
         footer.grid_columnconfigure(0, weight=1)
@@ -1172,37 +1172,15 @@ class LocalTcpApp:
             text_color=COLORS['muted'], fg_color=COLORS['soft'], corner_radius=11,
             padx=12, pady=9,
         )
-        self.status_label.pack(side='left')
-
-        # 每页的操作在右栏，停止按钮固定在底部并调用原来的取消逻辑。
-        action_panel = ctk.CTkFrame(shell, width=224, fg_color=COLORS['card'],
-                                    corner_radius=14, border_width=1, border_color=COLORS['border'])
-        action_panel.grid(row=0, column=2, sticky='nsew', padx=(12, 0))
-        action_panel.grid_propagate(False)
-        action_panel.grid_columnconfigure(0, weight=1)
-        action_panel.grid_rowconfigure(2, weight=1)
-        self.action_title = ctk.CTkLabel(action_panel, text='页面操作', anchor='w',
-                                         font=self._font(16, 'bold'), text_color=COLORS['text'])
-        self.action_title.grid(row=0, column=0, sticky='ew', padx=14, pady=(14, 4))
-        ctk.CTkLabel(action_panel, textvariable=self.page_title_var, anchor='w',
-                     font=self._font(12), text_color=COLORS['muted']).grid(
-                         row=1, column=0, sticky='ew', padx=14, pady=(0, 8))
-        self.action_scroll = ctk.CTkScrollableFrame(action_panel, fg_color=COLORS['card'],
-                                                   scrollbar_button_color=COLORS['soft'])
-        self.action_scroll.grid(row=2, column=0, sticky='nsew', padx=(8, 4))
-        self.action_sections = {}
-        self.active_action_section = None
-        footer_actions = ctk.CTkFrame(action_panel, fg_color=COLORS['soft'], corner_radius=9)
-        footer_actions.grid(row=3, column=0, sticky='ew', padx=10, pady=10)
-        ctk.CTkLabel(footer_actions, text='当前任务', anchor='w', font=self._font(11, 'bold'),
-                     text_color=COLORS['muted']).pack(fill='x', padx=8, pady=(7, 2))
+        self.status_label.pack(side='left', padx=(0, 9))
+        # 停止操作使用独立红色强调，并且不随页面控件一起禁用。
         self.stop_button = ctk.CTkButton(
-            footer_actions, text='停止当前操作', command=self._stop_operation,
-            width=0, height=44, corner_radius=8, font=self._font(12, 'bold'),
-            fg_color=COLORS['error_bg'], hover_color=COLORS['error_bg'],
-            text_color=COLORS['error_text'], state=tk.DISABLED,
+            header_actions, text='■  停止当前操作', command=self._stop_operation,
+            width=164, height=44, corner_radius=8, font=self._font(12, 'bold'),
+            fg_color=COLORS['error_text'], hover_color='#B42318', text_color='#FFFFFF',
+            state=tk.DISABLED,
         )
-        self.stop_button.pack(fill='x', padx=8, pady=(0, 8))
+        self.stop_button.pack(side='left')
 
         self.pages_frame = ctk.CTkFrame(content, fg_color='transparent')
         self.pages_frame.grid(row=1, column=0, sticky='nsew')
@@ -1233,11 +1211,11 @@ class LocalTcpApp:
         ctk.CTkLabel(log_header, text='操作记录', font=self._font(13, 'bold'),
                      text_color=COLORS['text']).grid(row=0, column=0, sticky='w')
         self.clear_log_button = ctk.CTkButton(
-            footer_actions, text='清空操作记录', width=0, height=30, font=self._font(11),
-            corner_radius=7, fg_color='transparent', hover_color=COLORS['border'],
+            log_header, text='清空', width=52, height=26, font=self._font(10),
+            corner_radius=7, fg_color='transparent', hover_color=COLORS['soft'],
             text_color=COLORS['muted'], command=self._clear_log,
         )
-        self.clear_log_button.pack(fill='x', padx=8, pady=(0, 7))
+        self.clear_log_button.grid(row=0, column=2, sticky='e')
         self.log = ctk.CTkTextbox(
             activity, height=112, wrap='word', corner_radius=9,
             border_width=1, border_color=COLORS['border'],
@@ -1246,54 +1224,6 @@ class LocalTcpApp:
         )
         self.log.grid(row=1, column=0, sticky='ew', padx=12, pady=(0, 9))
         self._show_page('home')
-
-    def _action_section(self, key):
-        section = self.action_sections.get(key)
-        if section is None:
-            section = ctk.CTkFrame(self.action_scroll, fg_color='transparent')
-            self.action_sections[key] = section
-        return section
-
-    def _rail_label(self, key, text):
-        label = ctk.CTkLabel(self._action_section(key), text=text, anchor='w',
-                             font=self._font(11, 'bold'), text_color=COLORS['muted'])
-        label.pack(fill='x', padx=4, pady=(8, 4))
-        return label
-
-    def _rail_button(self, key, text, command, accent=None):
-        section = self._action_section(key)
-        button = (self._primary_button(section, text, command, width=0, accent=accent)
-                  if accent else self._secondary_button(section, text, command, width=0))
-        button.configure(height=42, font=self._font(12, 'bold'))
-        button.pack(fill='x', padx=4, pady=(0, 6))
-        return button
-
-    def _show_action_section(self, page):
-        if not hasattr(self, 'action_sections'):
-            return
-        key = page
-        if page == 'w78':
-            key = 'w78:d133' if self.wireless_mode_var.get() == WIRELESS_D133_MODE else 'w78:hex'
-        if key == self.active_action_section:
-            return
-        if self.active_action_section is not None:
-            self.action_sections[self.active_action_section].pack_forget()
-        self.active_action_section = key
-        self._action_section(key).pack(fill='x')
-        # 切到新页面或烧录模式时，让右栏从第一项操作开始显示。
-        self.action_scroll._parent_canvas.yview_moveto(0)
-
-    def _flow_label(self, parent, **options):
-        # 根据中栏的实际可用宽度折行，长路径和提示在窄窗口也能完整显示。
-        initial = min(options.pop('wraplength', 480), 480)
-        options.setdefault('justify', 'left')
-        label = ctk.CTkLabel(parent, wraplength=initial, **options)
-        def fit(event):
-            width = max(50, int(label._reverse_widget_scaling(event.width)) - 40)
-            if label.cget('wraplength') != width:
-                label.configure(wraplength=width)
-        parent.bind('<Configure>', fit, add='+')
-        return label
 
     def _register_action(self, widget):
         self.action_widgets.append(widget)
@@ -1369,8 +1299,8 @@ class LocalTcpApp:
         self.host_entry.grid(row=1, column=0, sticky='ew')
         self.port_entry = self._new_entry(fields, self.port_var, width=100)
         self.port_entry.grid(row=1, column=1, sticky='ew', padx=(12, 0))
-        self._rail_label('home', '设备连接')
-        self.info_button = self._rail_button('home', '连接并读取信息', self._read_once, 'blue')
+        self.info_button = self._primary_button(fields, '连接并读取信息', self._read_once, width=176)
+        self.info_button.grid(row=1, column=2, sticky='e', padx=(12, 0))
 
         key_row = ctk.CTkFrame(connect_card, fg_color='transparent')
         key_row.grid(row=2, column=0, sticky='ew', padx=17, pady=(12, 15))
@@ -1378,36 +1308,38 @@ class LocalTcpApp:
         ctk.CTkLabel(key_row, text='Local TCP Key', font=self._font(12, 'bold'),
                      text_color=COLORS['muted']).grid(row=0, column=0, columnspan=4,
                                                       sticky='w', pady=(0, 5))
-
+        self.key_visibility_button = self._secondary_button(
+            key_row, '显示', self._toggle_key_visibility, width=66)
+        self.key_visibility_buttons.append(self.key_visibility_button)
         self.key_entry_home = self._new_entry(
             key_row, self.manual_key_var, '可直接粘贴 Key；留空时使用已导入文件', show='•')
         self.key_entry_home.grid(row=1, column=0, sticky='ew')
         self.key_entries.append(self.key_entry_home)
-        self.home_key_group = self._rail_label('home', '连接密钥')
-        self.import_key_button = self._rail_button('home', '导入 Key 文件…', self._choose_key)
-        self.key_visibility_button = self._rail_button('home', '显示', self._toggle_key_visibility)
-        self.key_visibility_buttons.append(self.key_visibility_button)
-        self.clear_key_button = self._rail_button('home', '不使用 Key', self._clear_key)
+        self.key_visibility_button.grid(row=1, column=1, sticky='e', padx=(9, 0))
+        self.import_key_button = self._secondary_button(
+            key_row, '导入 Key 文件…', self._choose_key, width=148)
+        self.import_key_button.grid(row=1, column=2, sticky='e', padx=(9, 0))
+        self.clear_key_button = self._secondary_button(
+            key_row, '不使用 Key', self._clear_key, width=100)
+        self.clear_key_button.grid(row=1, column=3, sticky='e', padx=(9, 0))
         key_color = COLORS['success_text'] if self.key_path else COLORS['warning_text']
-        self.key_name_label = self._flow_label(key_row, textvariable=self.key_var,
+        self.key_name_label = ctk.CTkLabel(key_row, textvariable=self.key_var,
                                            font=self._font(10), text_color=key_color, anchor='w')
         self.key_name_label.grid(row=2, column=0, sticky='ew', pady=(5, 0))
 
         actions = ctk.CTkFrame(page, fg_color='transparent')
         actions.grid(row=1, column=0, sticky='nsew')
-        # 总览保留快速入口，按两列排列给中栏留出空间。
-        actions.grid_columnconfigure((0, 1), weight=1, uniform='quick')
+        actions.grid_columnconfigure((0, 1, 2), weight=1, uniform='quick')
         self._shortcut_card(actions, 0, '设备信息', '查看详情', 'listen')
         self._shortcut_card(actions, 1, '固件升级', '选择升级包', 'ota')
         self._shortcut_card(actions, 2, '无线烧录', '打开', 'w78')
+        actions.grid_columnconfigure(3, weight=1, uniform='quick')
         self._shortcut_card(actions, 3, '测试用具', '打开', 'fixture')
 
     def _shortcut_card(self, parent, column, title, button_text, page):
         card = ctk.CTkFrame(parent, fg_color=COLORS['card'], corner_radius=12,
                             border_width=1, border_color=COLORS['border'])
-        row, grid_column = divmod(column, 2)
-        card.grid(row=row, column=grid_column, sticky='nsew', padx=(0, 5) if grid_column == 0 else (5, 0),
-                  pady=(0, 8))
+        card.grid(row=0, column=column, sticky='nsew', padx=(0 if column == 0 else 5, 5 if column < 3 else 0))
         ctk.CTkLabel(card, text=f'0{column + 1}', font=self._font(12, 'bold'),
                      text_color=COLORS['blue'], fg_color=COLORS['soft'],
                      corner_radius=7, padx=8, pady=4).pack(anchor='w', padx=13, pady=(13, 10))
@@ -1424,14 +1356,14 @@ class LocalTcpApp:
         page.grid_columnconfigure(0, weight=1)
         intro = self._page_card(page, 0, pady=(0, 10))
         intro.grid_columnconfigure(0, weight=1)
-        self._rail_label('listen', '设备状态')
-        self._rail_button('listen', '立即读取信息', self._read_once, 'blue')
-        self.listen_button = self._rail_button('listen', '保持信息连接', self._listen, 'teal')
+        self.listen_button = self._primary_button(
+            intro, '保持信息连接', self._listen, width=175, accent='teal')
+        self.listen_button.grid(row=0, column=0, sticky='w', padx=16, pady=10)
         ctk.CTkLabel(intro, text='只读连接中断后自动重连；停止后可执行烧录。',
                      font=self._font(10), text_color=COLORS['muted']).grid(
-                         row=1, column=0, sticky='w', padx=16, pady=(0, 10))
+                         row=1, column=0, columnspan=2, sticky='w', padx=16, pady=(0, 10))
         ctk.CTkLabel(intro, textvariable=self.device_received_var, font=self._font(12),
-                     text_color=COLORS['muted']).grid(row=0, column=0, sticky='w', padx=16, pady=(9, 3))
+                     text_color=COLORS['muted']).grid(row=0, column=1, sticky='e', padx=16)
 
         data_card = self._page_card(page, 1, pady=(0, 8))
         data_card.grid_columnconfigure(0, weight=1)
@@ -1475,10 +1407,10 @@ class LocalTcpApp:
             self.device_metric_detail_vars[key] = detail_var
             ctk.CTkLabel(tile, textvariable=value_var, font=self._font(18, 'bold'),
                          text_color=COLORS['text'], anchor='w', justify='left',
-                         wraplength=132).grid(row=1, column=0, sticky='ew', padx=11, pady=(0, 1))
+                         wraplength=240).grid(row=1, column=0, sticky='ew', padx=11, pady=(0, 1))
             ctk.CTkLabel(tile, textvariable=detail_var, font=self._font(12),
                          text_color=COLORS['muted'], anchor='w', justify='left',
-                         wraplength=132).grid(row=2, column=0, sticky='ew', padx=11, pady=(0, 8))
+                         wraplength=240).grid(row=2, column=0, sticky='ew', padx=11, pady=(0, 8))
 
         screen_card = self._page_card(page, 2, pady=(0, 8))
         screen_card.grid_columnconfigure(0, weight=1)
@@ -1488,9 +1420,13 @@ class LocalTcpApp:
         ctk.CTkLabel(screen_card, textvariable=self.screen_switch_status,
                      font=self._font(11), text_color=COLORS['muted']).grid(
             row=1, column=0, sticky='w', padx=16, pady=(0, 8))
-        self._rail_label('listen', 'D133 屏幕切换')
-        self._rail_button('listen', 'CS000 · 1024×600', lambda: self._switch_d133_screen('CS000'))
-        self._rail_button('listen', 'CS001 · 800×1280', lambda: self._switch_d133_screen('CS001'))
+        screen_buttons = ctk.CTkFrame(screen_card, fg_color='transparent')
+        screen_buttons.grid(row=0, column=1, rowspan=2, sticky='e', padx=16, pady=10)
+        self._secondary_button(screen_buttons, 'CS000 · 1024×600',
+                               lambda: self._switch_d133_screen('CS000'), width=172).pack(
+                                   side='left', padx=(0, 8))
+        self._secondary_button(screen_buttons, 'CS001 · 800×1280',
+                               lambda: self._switch_d133_screen('CS001'), width=172).pack(side='left')
 
         if self.device_info_cache is not None:
             self._update_device_metric_values(self.device_info_cache)
@@ -1500,17 +1436,17 @@ class LocalTcpApp:
         page = self._page('ota')
         page.grid_columnconfigure(0, weight=1)
         card = self._page_card(page, 0, pady=(0, 8))
-        self._rail_label('ota', '目标设备')
-        self._build_named_selector(self._action_section('ota'), 'ota')
+        self._build_named_selector(card, 'ota')
         file_box = ctk.CTkFrame(card, fg_color=COLORS['soft'], corner_radius=12)
         file_box.pack(fill='x', padx=18, pady=(0, 15))
         file_box.grid_columnconfigure(0, weight=1)
-        self.ota_file_box = file_box
-        self._flow_label(file_box, textvariable=self.package_var, font=self._font(12, 'bold'),
-                         text_color=COLORS['text'], anchor='w').grid(row=0, column=0, sticky='ew', padx=14, pady=(13, 3))
-        self.package_hint_label = self._flow_label(file_box, textvariable=self.package_hint_var,
-                                                   font=self._font(10), text_color=COLORS['cyan'], anchor='w')
+        ctk.CTkLabel(file_box, textvariable=self.package_var, font=self._font(12, 'bold'),
+                     text_color=COLORS['text'], anchor='w').grid(row=0, column=0, sticky='ew', padx=14, pady=(13, 3))
+        self.package_hint_label = ctk.CTkLabel(file_box, textvariable=self.package_hint_var,
+                                              font=self._font(10), text_color=COLORS['cyan'], anchor='w')
         self.package_hint_label.grid(row=1, column=0, sticky='ew', padx=14, pady=(0, 13))
+        self.browse_button = self._secondary_button(file_box, '选择系统 OTA…', self._choose_package, width=155)
+        self.browse_button.grid(row=0, column=1, rowspan=2, padx=13, pady=13)
 
         ctk.CTkLabel(
             card, text='升级列表（设备名称 | IP）',
@@ -1525,17 +1461,18 @@ class LocalTcpApp:
         # 系统 OTA 与设置共用目标列表；App 功能随完整固件统一更新。
         if self.ota_hosts_text:
             self.ota_hosts_input.insert('1.0', self.ota_hosts_text)
-        manual_row = self._action_section('ota')
+        manual_row = ctk.CTkFrame(card, fg_color='transparent')
+        manual_row.pack(fill='x', padx=18, pady=(0, 6))
+        manual_row.grid_columnconfigure(0, weight=1)
         self.ota_manual_ip_var = tk.StringVar(master=self.root)
         manual_entry = self._register_action(ctk.CTkEntry(
             manual_row, textvariable=self.ota_manual_ip_var,
             placeholder_text='输入设备 IP，点击添加或按回车', height=34))
         manual_entry._toolbox_user_data = True
-        manual_entry.pack(fill='x', padx=4, pady=(0, 6))
+        manual_entry.grid(row=0, column=0, sticky='ew', padx=(0, 8))
         manual_entry.bind('<Return>', lambda _event: self._add_ota_manual_host())
-        self._rail_button('ota', '添加设备', self._add_ota_manual_host)
-        self._rail_label('ota', '升级包')
-        self.browse_button = self._rail_button('ota', '选择系统 OTA…', self._choose_package)
+        self._secondary_button(manual_row, '添加设备', self._add_ota_manual_host,
+                               width=100).grid(row=0, column=1)
         self.ota_selection_frame = ctk.CTkScrollableFrame(
             card, height=100, fg_color=COLORS['input'], corner_radius=9,
             border_width=1, border_color=COLORS['border'])
@@ -1545,7 +1482,7 @@ class LocalTcpApp:
         self.ota_selection_signature = None
         self._refresh_ota_names()
         ctk.CTkLabel(
-            card, text='仅升级列表中的设备。端口和 Key 使用总览配置。',
+            card, text='仅升级列表中的设备；可逐台删除。所有目标同时升级，端口和 Key 使用总览配置。',
             font=self._font(9), text_color=COLORS['muted'], anchor='w',
         ).pack(fill='x', padx=18, pady=(0, 12))
 
@@ -1566,15 +1503,18 @@ class LocalTcpApp:
         actions.pack(fill='x', padx=18, pady=(0, 18))
         ctk.CTkLabel(actions, text='⚠ 升级期间请保持开发板供电。', font=self._font(10, 'bold'),
                      text_color=COLORS['warning_text']).pack(side='left')
-        self.ota_button = self._rail_button('ota', '上传并安装', self._upload_ota, 'teal')
+        self.ota_button = self._primary_button(actions, '上传并安装', self._upload_ota,
+                                               width=160, accent='teal')
+        self.ota_button.pack(side='right')
 
         boot_card = self._page_card(page, 1)
         ctk.CTkLabel(boot_card, text='内部 BOOT 更新（单台 STM32F750）',
                      font=self._font(14, 'bold')).pack(anchor='w', padx=18, pady=(14, 7))
-        self._flow_label(boot_card, text='与系统 OTA 分开；需先安装系统1.4.43，配套Key必需。单份原址更新，断电可能需要ST-LINK恢复。',
-                         text_color=COLORS['warning_text']).pack(fill='x', padx=18, pady=(0, 14))
-        self._rail_label('ota', '更多')
-        self.boot_entry_button = self._rail_button('ota', '进入内部 BOOT 更新…', lambda: self._show_page('boot'))
+        ctk.CTkLabel(boot_card, text='与系统 OTA 分开；需先安装系统1.4.43，配套Key必需。单份原址更新，断电可能需要ST-LINK恢复。',
+                     wraplength=760, justify='left', text_color=COLORS['warning_text']).pack(fill='x', padx=18, pady=(0, 10))
+        self.boot_entry_button = self._secondary_button(boot_card, '进入内部 BOOT 更新…',
+                                                       lambda: self._show_page('boot'), width=230)
+        self.boot_entry_button.pack(anchor='w', padx=18, pady=(0, 15))
         self._refresh_boot_controls()
 
     def _build_boot_page(self):
@@ -1608,6 +1548,8 @@ class LocalTcpApp:
         self.wireless_hex_card = self._build_wireless_hex_card(page)
         self.wireless_d133_card = d133_proxy_ui.build_card(self, sys.modules[__name__], page, row=1)
         self._show_wireless_mode()
+        if self.is_running:
+            self._set_controls_enabled(False)
 
     def _show_wireless_mode(self):
         # 保留各模式已选的文件和设置，切换时仅更换可见表单。
@@ -1617,28 +1559,26 @@ class LocalTcpApp:
         else:
             self.wireless_d133_card.grid_remove()
             self.wireless_hex_card.grid()
-        if self.active_page_key == 'w78':
-            self._show_action_section('w78')
 
     def _build_wireless_hex_card(self, page):
         card = self._page_card(page, 1, pady=(0, 8))
 
-        self._rail_label('w78:hex', '烧录对象')
-        target_row = self._action_section('w78:hex')
+        target_row = ctk.CTkFrame(card, fg_color='transparent')
+        target_row.pack(fill='x', padx=18, pady=(12, 8))
+        ctk.CTkLabel(target_row, text='烧录对象', font=self._font(11, 'bold'),
+                     text_color=COLORS['text']).pack(side='left', padx=(0, 10))
         self.w78_target_var = tk.StringVar(master=self.root, value='W78E516DDG（已接入）')
         self.w78_target_selector = self._register_action(ctk.CTkComboBox(
             target_row, variable=self.w78_target_var,
             values=['W78E516DDG（已接入）', 'PIC24FJ256DA210（已接入）', '其它目标（接口预留）'],
-            state='readonly', width=0, height=36, font=self._font(11),
+            state='readonly', width=230, height=34,
             command=self._select_w78_target))
-        self.w78_target_selector.pack(fill='x', padx=4, pady=(0, 6))
-        ctk.CTkLabel(card, textvariable=self.w78_target_var, font=self._font(15, 'bold'),
-                     text_color=COLORS['text'], anchor='w').pack(fill='x', padx=18, pady=(12, 8))
+        self.w78_target_selector.pack(side='left')
         self.w78_target_notice = ctk.CTkLabel(
             card, text='请选择 W78E516DDG 或 PIC24FJ256DA210；其它对象暂未接入。',
             fg_color=COLORS['warning_bg'], text_color=COLORS['warning_text'],
             corner_radius=8, anchor='w', justify='left')
-        self._build_named_selector(target_row, 'w78')
+        self._build_named_selector(card, 'w78')
         connection_row = ctk.CTkFrame(card, fg_color='transparent')
         connection_row.pack(fill='x', padx=18, pady=(0, 9))
         ctk.CTkLabel(connection_row, text='设备 IP', font=self._font(10, 'bold'),
@@ -1653,15 +1593,16 @@ class LocalTcpApp:
         file_box = ctk.CTkFrame(card, fg_color=COLORS['soft'], corner_radius=12)
         file_box.pack(fill='x', padx=18, pady=(0, 10))
         file_box.grid_columnconfigure(0, weight=1)
-        self._flow_label(file_box, textvariable=self.w78_hex_name_var,
+        ctk.CTkLabel(file_box, textvariable=self.w78_hex_name_var,
                      font=self._font(12, 'bold'), text_color=COLORS['text'],
                      anchor='w').grid(row=0, column=0, sticky='ew', padx=14, pady=(13, 3))
-        self._flow_label(file_box, textvariable=self.w78_hex_summary_var,
+        ctk.CTkLabel(file_box, textvariable=self.w78_hex_summary_var,
                      font=self._font(10), text_color=COLORS['cyan'], anchor='w',
                      wraplength=600, justify='left').grid(
                          row=1, column=0, sticky='ew', padx=14, pady=(0, 13))
-        self._rail_label('w78:hex', '烧录文件')
-        self.w78_hex_browse_button = self._rail_button('w78:hex', '选择 HEX…', self._choose_w78_hex)
+        self.w78_hex_browse_button = self._secondary_button(
+            file_box, '选择 HEX…', self._choose_w78_hex, width=155)
+        self.w78_hex_browse_button.grid(row=0, column=1, rowspan=2, padx=13, pady=13)
 
         self.w78_progress = ctk.CTkProgressBar(
             card, height=9, corner_radius=6, progress_color=COLORS['teal'],
@@ -1677,8 +1618,10 @@ class LocalTcpApp:
         ctk.CTkLabel(actions, text='烧录会擦除目标程序区。',
                      font=self._font(10, 'bold'), text_color=COLORS['warning_text'],
         ).pack(side='left')
-        self.w78_program_button = self._rail_button(
-            'w78:hex', '无线上传并烧录', self._upload_w78_wireless, 'teal')
+        self.w78_program_button = self._primary_button(
+            actions, '无线上传并烧录', self._upload_w78_wireless,
+            width=180, accent='teal')
+        self.w78_program_button.pack(side='right')
         self.w78_target_notice.pack(fill='x', padx=18, pady=(0, 10))
         self.w78_target_notice.pack_forget()
         self._select_w78_target(self.w78_target_var.get())
@@ -2068,9 +2011,6 @@ class LocalTcpApp:
             else:
                 frame.grid_remove()
         self.page_title_var.set(titles[page])
-        self._show_action_section(page)
-        if getattr(self, 'is_running', False) and hasattr(self, 'action_widgets'):
-            self._set_controls_enabled(False)
         for key, button in self.nav_buttons.items():
             active = key == page
             button.configure(
@@ -2748,7 +2688,7 @@ class LocalTcpApp:
         for child in self.ota_selection_frame.winfo_children():
             child.destroy()
         if not rows:
-            ctk.CTkLabel(self.ota_selection_frame, text='尚未选择升级设备，请在右栏选择或添加 IP。',
+            ctk.CTkLabel(self.ota_selection_frame, text='尚未选择升级设备，请从上方选择或手动添加 IP。',
                          text_color=COLORS['muted']).grid(row=0, column=0, sticky='w', padx=8, pady=8)
         for index, (host, label) in enumerate(rows):
             row = ctk.CTkFrame(self.ota_selection_frame, fg_color=COLORS['soft'])

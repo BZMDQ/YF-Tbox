@@ -68,7 +68,8 @@ def main() -> None:
                 root.update_idletasks()
                 page = app.pages['devices']
                 entries = [w for w in widgets(page) if isinstance(w, gui.ctk.CTkEntry)]
-                button = app.device_add_button
+                button = next(w for w in widgets(page) if isinstance(w, gui.ctk.CTkButton)
+                              and w.cget('text') == '添加到列表')
                 entries[0].insert(0, '192.168.21.107')
                 entries[1].insert(0, '123')
                 button.invoke()
