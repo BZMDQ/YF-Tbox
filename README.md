@@ -1,3 +1,11 @@
+# F750 1.4.67 · LTDC、ART 与存储分层
+
+LTDC 自主扫描 SDRAM 双帧缓冲；GUI、字库、手写识别和解压等冷路径在 QSPI 执行。内部 BOOT 1.0.17 保留 AXI 烧录入口，启动后转到 ITCM，LTDC 换帧和蜂鸣器定时的短路径可使用片内 ART。FreeRTOS 调度和 Flash 擦写所需代码保留在 SRAM。
+
+OTA、完整工厂 HEX 和独立 BOOT HEX 已同步至烧录工具箱局域网下载目录。系统 OTA 不修改内部 BOOT；使用旧 BOOT 时保留 SRAM 回退。Keil 编译和镜像核对通过，启动及性能需实板确认。
+
+---
+
 # F750 1.4.65 · FreeRTOS 与独立看门狗
 
 F750 系统切换到 FreeRTOS Kernel V11.3.3，显示、触摸、网络、USB、烧录和看门狗均有独立工作任务，使用 128 KiB SDRAM 动态堆。系统运行时由 TIM5 捕获 LSI，按实测值将 IWDG 配置到约 15 秒，关键任务活跃时才续期。留用 BOOT 1.0.16、研发工具箱 0.8.57 和 D133 1.0.173；D133 USB 128 KiB 协商仍可用。
