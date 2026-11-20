@@ -35,6 +35,9 @@ W78_PIPELINE_NEGOTIATE = 31
 W78_PIPELINE_DATA_LEGACY = 32
 W78_PIPELINE_DATA = 33
 W78_MAX_PAYLOAD = 16 * 1024
+W78_RAW_MAX_PAYLOAD = 32 * 1024
+W78_ACK_TIMEOUT = 4.0
+W78_ACK_POLL = 0.25
 W78_LOGICAL_CHUNK_SIZES = (4096, 8192, 16384, 32768)
 W78_STATE_READY = 3
 W78_STATE_DONE = 13
@@ -78,24 +81,29 @@ class SocketReader:
         self.sock = sock
         self.buffer = bytearray()
 
-    def exact(self, count):
+    def peek(self, count):
         while len(self.buffer) < count:
             part = self.sock.recv(count - len(self.buffer))
             if not part:
                 raise ConnectionError('设备已关闭连接')
             self.buffer.extend(part)
-        data = bytes(self.buffer[:count])
+        return bytes(self.buffer[:count])
+
+    def exact(self, count):
+        data = self.peek(count)
         del self.buffer[:count]
         return data
 
 
 def receive(sock, reader=None):
     read_exact = reader.exact if reader is not None else lambda count: exact(sock, count)
-    header = read_exact(20)
+    # 整帧读齐才消费头部，避免正文分段到达时一次超时破坏流对齐。
+    buffered = isinstance(reader, SocketReader)
+    header = reader.peek(HEADER.size) if buffered else read_exact(HEADER.size)
     magic, op, status, size, crc = HEADER.unpack(header)
     if magic != b'LNET' or size > 1024:
         raise ValueError('无效响应头')
-    body = read_exact(size)
+    body = (read_exact(HEADER.size + size)[HEADER.size:] if buffered else read_exact(size))
     if zlib.crc32(body, zlib.crc32(header[:16])) & 0xffffffff != crc:
         raise ValueError('响应 CRC 校验失败')
     if status:
@@ -192,41 +200,36 @@ def request_wait(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
 
 def upload_w78_window(sock, package, logical_chunk_size, session_id, stop_event,
                       on_progress=None, on_info=None, send_lock=None,
-                      target=0, window=W78_PIPELINE_WINDOW, max_retries=3):
-    """每个 32 KiB 逻辑块拆成不超过 16 KiB 的有序协议帧流水发送。"""
+                      target=0, window=W78_PIPELINE_WINDOW, max_retries=3, on_retry=None):
+    """原始 HEX 最多 32 KiB 一帧、窗口 2；按旧固件能力逐级回退。"""
     total = len(package)
-    frame_request = min(logical_chunk_size, W78_MAX_PAYLOAD)
+    frame_request = min(logical_chunk_size, W78_RAW_MAX_PAYLOAD)
     if session_id <= 0 or session_id > 0x00FFFFFF:
         raise ValueError('流水会话号超出 24 位范围。')
 
-    # 新固件用外层 offset 携带会话号/序号，保留 16 KiB 的单帧数据上限。
-    raw_mode = True
-    hello = struct.pack('<IIII', session_id, window, frame_request, 1)
-    try:
-        caps = request(sock, W78_PIPELINE_NEGOTIATE, target, hello,
-                       on_info=on_info, send_lock=send_lock)
-    except DeviceError as exc:
-        if exc.status == 4:
-            # 旧固件仅接受 12 字节协商头，退回带会话和绝对偏移的旧帧格式。
-            raw_mode = False
-            legacy_request = min(logical_chunk_size, W78_MAX_PAYLOAD)
-            hello = struct.pack('<III', session_id, window, legacy_request)
-            try:
-                caps = request(sock, W78_PIPELINE_NEGOTIATE, target, hello,
-                               on_info=on_info, send_lock=send_lock)
-            except DeviceError as legacy_exc:
-                if legacy_exc.status in (11, 13):
-                    return None
+    # 先协商 32 KiB 原始帧；旧板拒绝时保留原始格式再试 16 KiB，最后才试旧帧。
+    legacy_request = min(logical_chunk_size, W78_MAX_PAYLOAD)
+    negotiation = [(True, frame_request)]
+    if frame_request > legacy_request:
+        negotiation.append((True, legacy_request))
+    negotiation.append((False, legacy_request))
+    for index, (raw_mode, frame_request) in enumerate(negotiation):
+        hello = (struct.pack('<IIII', session_id, window, frame_request, 1)
+                 if raw_mode else struct.pack('<III', session_id, window, frame_request))
+        try:
+            caps = request(sock, W78_PIPELINE_NEGOTIATE, target, hello,
+                           on_info=on_info, send_lock=send_lock)
+            break
+        except DeviceError as exc:
+            if exc.status in (11, 13):
+                return None
+            if exc.status != 4 or index == len(negotiation) - 1:
                 raise
-        elif exc.status in (11, 13):
-            # 更旧固件不支持流水传输，由调用方改用顺序分包。
-            return None
-        else:
-            raise
+
     if len(caps) != 24:
         raise ValueError('开发板返回的流水传输协商数据无效。')
     remote_session, max_data, remote_window, next_seq, next_offset, credits = struct.unpack('<6I', caps)
-    protocol_limit = W78_MAX_PAYLOAD if raw_mode else W78_MAX_PAYLOAD - 8
+    protocol_limit = W78_RAW_MAX_PAYLOAD if raw_mode else W78_MAX_PAYLOAD - 8
     if (remote_session != session_id or max_data < 1024 or max_data > protocol_limit
             or remote_window < 1 or remote_window > W78_PIPELINE_WINDOW
             or next_seq != 0 or next_offset != 0 or not credits):
@@ -253,6 +256,20 @@ def upload_w78_window(sock, package, logical_chunk_size, session_id, stop_event,
         else:
             with send_lock:
                 sock.sendall(packet)
+
+    def resend(item, reason, error):
+        nonlocal retries_total
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError()
+        if item['retries'] >= max_retries:
+            raise TimeoutError(error)
+        sock.settimeout(old_timeout)
+        send_packet(item['packet'])
+        item['retries'] += 1
+        item['sent_at'] = time.monotonic()
+        retries_total += 1
+        if on_retry:
+            on_retry(reason)
 
     try:
         while acked_offset < total:
@@ -286,31 +303,24 @@ def upload_w78_window(sock, package, logical_chunk_size, session_id, stop_event,
             if not pending:
                 raise ConnectionError('开发板未返回流水发送额度。')
             oldest = min(pending, key=lambda seq: pending[seq]['sent_at'])
-            wait = max(0.05, min(1.0, 1.0 - (time.monotonic() - pending[oldest]['sent_at'])))
+            remaining = W78_ACK_TIMEOUT - (time.monotonic() - pending[oldest]['sent_at'])
+            wait = max(0.05, min(W78_ACK_POLL, remaining))
             sock.settimeout(wait)
             try:
                 response, body = receive(sock, reader=reader)
             except socket.timeout:
+                # 短轮询用于响应取消；只有完整 ACK 等待期限届满才重传。
                 item = pending[oldest]
-                if item['retries'] >= max_retries:
-                    raise TimeoutError('HEX 分包多次重传仍未收到开发板确认。')
-                sock.settimeout(old_timeout)
-                send_packet(item['packet'])
-                item['retries'] += 1
-                item['sent_at'] = time.monotonic()
-                retries_total += 1
+                if time.monotonic() - item['sent_at'] < W78_ACK_TIMEOUT:
+                    continue
+                if reader.buffer:
+                    raise TimeoutError('开发板的 HEX 确认帧未收齐，已停止上传。')
+                resend(item, 'timeout', 'HEX 分包多次重传仍未收到开发板确认。')
                 continue
             except DeviceError as exc:
                 if exc.status != 1:
                     raise
-                item = pending[oldest]
-                if item['retries'] >= max_retries:
-                    raise TimeoutError('HEX 分包校验多次失败，停止重传。')
-                sock.settimeout(old_timeout)
-                send_packet(item['packet'])
-                item['retries'] += 1
-                item['sent_at'] = time.monotonic()
-                retries_total += 1
+                resend(pending[oldest], 'crc', 'HEX 分包校验多次失败，停止重传。')
                 continue
 
             if response == 0x80000001:
@@ -343,13 +353,7 @@ def upload_w78_window(sock, package, logical_chunk_size, session_id, stop_event,
                 # 设备告知它仍在等的序号；重传该分包，不把乱序数据写入 HEX 缓冲。
                 missing = pending.get(expected_seq)
                 if missing is not None:
-                    if missing['retries'] >= max_retries:
-                        raise TimeoutError('流水序号多次重传仍未被开发板接受。')
-                    sock.settimeout(old_timeout)
-                    send_packet(missing['packet'])
-                    missing['retries'] += 1
-                    missing['sent_at'] = time.monotonic()
-                    retries_total += 1
+                    resend(missing, 'sequence', '流水序号多次重传仍未被开发板接受。')
             send_credit = min(window, credit)
     finally:
         sock.settimeout(old_timeout)

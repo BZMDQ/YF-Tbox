@@ -62,7 +62,7 @@ def test_raw_window_two_32k_logical_blocks_and_retry():
             assert op == 31 and target == 1 and len(hello) == 16
             sid, requested_window, requested_frame, feature = struct.unpack('<4I', hello)
             assert (sid, requested_window, requested_frame, feature) == (
-                session, 2, FRAME_DATA_SIZE, 1)
+                session, 2, logical_chunk, 1)
             caps = struct.pack('<6I', session, FRAME_DATA_SIZE, 2, 0, 0, 2)
             send_reply(device, 31 | 0x80000000, 0, caps)
 
@@ -122,8 +122,11 @@ def test_old_16k_payload_pipeline_fallback():
             op, target, hello = recv_frame(device)
             assert op == 31 and target == 1 and len(hello) == 16
             sid, window, requested, feature = struct.unpack('<4I', hello)
-            assert (sid, window, requested, feature) == (session, 2, 16384, 1)
-            # 老固件拒绝扩展协商头，工具箱必须回退到现有 op32 格式。
+            assert (sid, window, requested, feature) == (session, 2, 32768, 1)
+            # 旧板先尝试 16 KiB 原始帧，不支持扩展头时才走 op32。
+            send_reply(device, 31 | 0x80000000, 4)
+            op, target, raw16 = recv_frame(device)
+            assert op == 31 and target == 1 and struct.unpack('<4I', raw16) == (session, 2, 16384, 1)
             send_reply(device, 31 | 0x80000000, 4)
             op, target, hello = recv_frame(device)
             assert op == 31 and target == 1 and len(hello) == 12
@@ -155,6 +158,9 @@ def test_old_16k_payload_pipeline_fallback():
 def test_legacy_sequential_fallback():
     host, device = socket.socketpair()
     def peer():
+        op, _target, hello = recv_frame(device)
+        assert op == 31 and len(hello) == 16
+        send_reply(device, 31 | 0x80000000, 4)
         op, _target, hello = recv_frame(device)
         assert op == 31 and len(hello) == 16
         send_reply(device, 31 | 0x80000000, 4)

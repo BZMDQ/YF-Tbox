@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.62'
+APP_VERSION = '0.8.63'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1012,7 +1012,7 @@ class LocalTcpApp:
         add_setting_row('无线烧录逻辑块大小', self.settings_w78_chunk_var,
                         ['4 KiB', '8 KiB', '16 KiB', '32 KiB'])
         ctk.CTkLabel(
-            card, text='新固件用两个 16 KiB 数据帧传 32 KiB 逻辑块；旧协议自动回退到不超过 16 KiB 的帧。',
+            card, text='32 KiB 单帧需 F750 1.4.75；旧固件自动回退。',
             font=self._font(9), text_color=COLORS['muted'], anchor='w',
         ).pack(fill='x', padx=18, pady=(9, 5))
 
@@ -4667,12 +4667,15 @@ class LocalTcpApp:
                     self._post('log', '当前开发板固件未提供中文文件名显示；升级至 1.2.0 后支持。')
                 upload_started = time.monotonic()
                 session_id = uuid.uuid4().int & 0x00FFFFFF or 1
+                retry_causes = {'timeout': 0, 'crc': 0, 'sequence': 0}
+                def note_retry(reason):
+                    retry_causes[reason] += 1
                 pipeline = upload_w78_window(
                     sock, package, self.w78_chunk_size, session_id, stop_event,
                     on_progress=lambda written, _total: self._post(
                         'w78_progress', (written, total, f'HEX 接收确认：{written:,} / {total:,} 字节')),
                     on_info=self._on_device_info, send_lock=self.w78_send_lock,
-                    target=1 if pic24 else 0,
+                    target=1 if pic24 else 0, on_retry=note_retry,
                 )
                 if pipeline is None:
                     # 老固件不支持流水协议；每个兼容帧仍不超过 16 KiB。
@@ -4692,8 +4695,10 @@ class LocalTcpApp:
                         self.w78_chunk_size, legacy_chunk, 1, 0, False)
                 else:
                     logical_chunk, frame_size, upload_window, retries, raw_mode = pipeline
-                    frame_format = '16 KiB 原始帧' if raw_mode else '旧协议兼容帧'
-                    self._post('log', f'流水上传：逻辑块 {logical_chunk:,} 字节，{frame_format}上限 {frame_size:,} 字节，窗口 {upload_window}，重传 {retries} 次。')
+                    frame_format = '原始帧' if raw_mode else '旧协议兼容帧'
+                    causes = '，'.join(f'{label} {retry_causes[key]}' for key, label in
+                                       (('timeout', 'ACK 超时'), ('crc', 'CRC'), ('sequence', '序号')))
+                    self._post('log', f'流水上传：{frame_format} {frame_size:,} 字节，窗口 {upload_window}，重传 {retries} 次（{causes}）。')
 
                 upload_seconds = max(time.monotonic() - upload_started, 0.001)
                 self._post('log', f'HEX 接收确认完成：{total:,} 字节，{upload_seconds:.2f} 秒，平均 {total / upload_seconds / 1024:.1f} KiB/秒；逻辑块 {logical_chunk:,} 字节，帧 {frame_size:,} 字节，窗口 {upload_window}。')
