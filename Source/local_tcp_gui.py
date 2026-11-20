@@ -41,7 +41,7 @@ import d133_proxy_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.60'
+APP_VERSION = '0.8.61'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1467,18 +1467,6 @@ class LocalTcpApp:
                          text_color=COLORS['muted'], anchor='w', justify='left',
                          wraplength=240).grid(row=2, column=0, sticky='ew', padx=11, pady=(0, 8))
 
-        screen_card = self._page_card(page, 2, pady=(0, 8))
-        screen_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(screen_card, text='D133 屏幕切换', font=self._font(15, 'bold'),
-                     text_color=COLORS['text']).grid(row=0, column=0, sticky='w', padx=16, pady=(12, 2))
-        self.screen_switch_status = tk.StringVar(value='—')
-        ctk.CTkLabel(screen_card, textvariable=self.screen_switch_status,
-                     font=self._font(11), text_color=COLORS['muted']).grid(
-            row=1, column=0, sticky='w', padx=16, pady=(0, 8))
-        screen_buttons = self._rail_card('listen', 'D133 屏幕', row=1)
-        self._rail_button(screen_buttons, 'CS000 · 1024×600', lambda: self._switch_d133_screen('CS000'))
-        self._rail_button(screen_buttons, 'CS001 · 800×1280', lambda: self._switch_d133_screen('CS001'))
-
         if self.device_info_cache is not None:
             self._update_device_metric_values(self.device_info_cache)
 
@@ -2512,9 +2500,6 @@ class LocalTcpApp:
                     self._fixture_accept(value)
                 elif kind == 'device_info':
                     self._render_device_info(value)
-                elif kind == 'screen_switch_status':
-                    if hasattr(self, 'screen_switch_status'):
-                        self.screen_switch_status.set(value)
                 elif kind == 'connection_state':
                     self._set_connection_state(value)
                 elif kind == 'u12_recovery':
@@ -3226,38 +3211,6 @@ class LocalTcpApp:
                 self._post('log', '设备信息：\n' + self._format_json(body))
                 self._post('status', '已读取设备信息')
         self._start_task('读取设备信息', action)
-
-    def _switch_d133_screen(self, code):
-        if code not in ('CS000', 'CS001'):
-            return
-
-        def action(args, key, stop_event):
-            with self._connection(args, key, stop_event) as sock:
-                if stop_event.is_set():
-                    raise InterruptedError()
-                try:
-                    body = request(sock, 28, payload=code.encode('ascii'),
-                                   on_info=self._on_device_info)
-                except DeviceError as exc:
-                    messages = {
-                        3: '设备正在执行其他任务，暂时不能切换屏幕。',
-                        4: '屏幕代号无效，请选择 CS000 或 CS001。',
-                        5: '设备无法保存屏幕配置或启动重启。',
-                        13: 'Key 认证失败，请导入与开发板匹配的 Local TCP Key。',
-                    }
-                    raise RuntimeError(messages.get(exc.status, str(exc))) from exc
-                if body == b'REBOOTING':
-                    self._post('screen_switch_status', f'设备已接受 {code}，正在重启…')
-                    self._post('log', f'设备已接受屏幕切换到 {code}，正在重启。')
-                    self._post('status', '屏幕切换中')
-                elif body:
-                    raise ValueError('设备屏幕切换应答内容无效。')
-                else:
-                    self._post('screen_switch_status', f'设备当前已使用 {code}。')
-                    self._post('log', f'设备当前已使用 {code}。')
-                    self._post('status', '屏幕型号已匹配')
-
-        self._start_task(f'切换屏幕到 {code}', action)
 
     def _listen(self):
         def action(args, key, stop_event):
