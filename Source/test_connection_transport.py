@@ -19,6 +19,57 @@ import device_directory as directory
 import local_tcp_client as client
 
 
+class DiscoverySchedulingTests(unittest.TestCase):
+    def test_first_finished_address_refills_before_the_slow_address(self):
+        cancel = threading.Event()
+        release = threading.Event()
+        last_started = threading.Event()
+
+        def probe_one(ip):
+            if ip == 0:
+                self.assertTrue(release.wait(3))
+            if ip == 5:
+                last_started.set()
+            return ip
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(lambda: list(directory.iter_scan_results(range(6), probe_one, cancel, 2)))
+            try:
+                self.assertTrue(last_started.wait(2))
+                self.assertFalse(result.done())
+            finally:
+                release.set()
+            self.assertEqual(sorted(result.result(3)), list(range(6)))
+
+    def test_cancel_limits_work_to_addresses_already_started(self):
+        cancel = threading.Event()
+        release = threading.Event()
+        started = threading.Event()
+        submitted = []
+
+        def ips():
+            for ip in range(4096):
+                submitted.append(ip)
+                yield ip
+
+        def probe_one(ip):
+            if ip == 3:
+                started.set()
+            self.assertTrue(release.wait(3))
+            return ip
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            result = executor.submit(lambda: list(directory.iter_scan_results(ips(), probe_one, cancel, 4)))
+            try:
+                self.assertTrue(started.wait(2))
+                self.assertEqual(submitted, list(range(4)))
+            finally:
+                cancel.set()
+                release.set()
+            self.assertEqual(result.result(3), [])
+            self.assertEqual(submitted, list(range(4)))
+
+
 class LoopbackServer:
     def __init__(self, handler, count=1):
         self.listener = socket.socket()

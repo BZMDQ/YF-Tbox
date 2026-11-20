@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+from itertools import islice
 import ipaddress
 import json
 import queue
@@ -206,6 +207,13 @@ def route_interface(ip, interfaces):
     return min(candidates)[2:] if candidates else None
 
 
+# 并发设有上限，避免大网段一次创建大量连接；保留两轮 TCP 探测的超时档。
+_SCAN_TCP_WORKERS = 32
+_SCAN_RETRY_WORKERS = 24
+_SCAN_UDP_WINDOW = 2.0
+_SCAN_UDP_RETRY_AT = 0.7
+
+
 def udp_discover(targets, interfaces, cancel, report):
     """DNET v1 type5 request/type6 reply, nonce + CRC; TCP verifies every reply."""
     sockets = []
@@ -235,8 +243,12 @@ def udp_discover(targets, interfaces, cancel, report):
         allowed = set(targets)
         start = time.monotonic()
         sent_round = -1
-        while time.monotonic() - start < 4.2 and not cancel.is_set():
-            round_no = min(2, int((time.monotonic() - start) / 1.3))
+        # UDP 用来提高候选优先级及识别端口。整个范围仍由后续 TCP 核验。
+        while not cancel.is_set() and len(found) < len(allowed):
+            elapsed = time.monotonic() - start
+            if elapsed >= _SCAN_UDP_WINDOW:
+                break
+            round_no = int(elapsed >= _SCAN_UDP_RETRY_AT)
             if round_no != sent_round:
                 sent_round = round_no
                 for sock, source in sockets:
@@ -342,6 +354,28 @@ def probe(ip, port, request, interfaces=(), known=False, confirm=False,
                 with lock:
                     active_sockets.discard(sock)
     return 'failed', (ip, stage, '读取未完成', protocol)
+
+
+def iter_scan_results(ips, probe_one, cancel, workers):
+    """滚动启动探测，任意地址完成后补位，停止时不再发起新连接。"""
+    remaining = iter(ips)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        active = set()
+        free = workers
+        while not cancel.is_set():
+            for ip in islice(remaining, free):
+                if cancel.is_set():
+                    return
+                active.add(executor.submit(probe_one, ip))
+            if not active:
+                return
+            done, active = concurrent.futures.wait(
+                active, timeout=0.1, return_when=concurrent.futures.FIRST_COMPLETED)
+            free = len(done)
+            for future in done:
+                if cancel.is_set():
+                    return
+                yield future.result()
 
 
 def install(gui):
@@ -720,51 +754,33 @@ def install(gui):
                 ordered = sorted(verify, key=lambda ip: (ip not in candidates, ip not in priority, ipaddress.IPv4Address(ip)))
                 app.device_scan_queue.put(('plan', len(ordered)))
                 app.device_scan_queue.put(('note', '每次刷新都会核验扫描范围；UDP候选优先检查，避免漏掉未响应UDP的开发板。'))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-                    futures = {executor.submit(probe, ip, ports.get(ip, port), gui.request, interfaces,
-                                               ip in priority or ip in candidates,
-                                               cancel=app.device_scan_cancel,
-                                               active_sockets=app.device_scan_sockets,
-                                               active_lock=app.device_scan_socket_lock): ip for ip in ordered}
-                    for future in concurrent.futures.as_completed(futures):
-                        if app.device_scan_cancel.is_set():
-                            app.device_scan_queue.put(('cancelled', None))
-                            return
-                        result = future.result()
-                        if result[0] == 'cancelled' or app.device_scan_cancel.is_set():
-                            app.device_scan_queue.put(('cancelled', None))
-                            return
-                        kind, value = record(*result)
-                        if kind == 'found':
-                            app.device_scan_queue.put((kind, value))
-                        elif kind == 'failed':
-                            ip, stage, error, protocol = value
-                            if ip in priority or ip in candidates or protocol or 'timed out' in error or '10060' in error:
-                                pending.append(ip)
-                            app.device_scan_queue.put(('first_failed', value))
-                if pending and not app.device_scan_cancel.is_set():
+                cancel = app.device_scan_cancel
+
+                def probe_one(ip, confirm=False):
+                    return probe(ip, ports.get(ip, port), gui.request, interfaces,
+                                 known=ip in priority or ip in candidates, confirm=confirm,
+                                 cancel=cancel, active_sockets=app.device_scan_sockets,
+                                 active_lock=app.device_scan_socket_lock)
+
+                for result in iter_scan_results(ordered, probe_one, cancel, _SCAN_TCP_WORKERS):
+                    kind, value = record(*result)
+                    if kind == 'found':
+                        app.device_scan_queue.put((kind, value))
+                    elif kind == 'failed':
+                        ip, stage, error, protocol = value
+                        if ip in priority or ip in candidates or protocol or 'timed out' in error or '10060' in error:
+                            pending.append(ip)
+                        app.device_scan_queue.put(('first_failed', value))
+                if pending and not cancel.is_set():
                     app.device_scan_queue.put(('retrying', len(pending)))
-                    if app.device_scan_cancel.wait(0.8):
-                        app.device_scan_queue.put(('cancelled', None))
-                        return
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                        futures = {executor.submit(probe, ip, ports.get(ip, port), gui.request, interfaces,
-                                                   ip in priority or ip in candidates, True,
-                                                   app.device_scan_cancel, app.device_scan_sockets,
-                                                   app.device_scan_socket_lock): ip for ip in pending}
-                        for future in concurrent.futures.as_completed(futures):
-                            if app.device_scan_cancel.is_set():
-                                app.device_scan_queue.put(('cancelled', None))
-                                return
-                            result = future.result()
-                            if result[0] == 'cancelled' or app.device_scan_cancel.is_set():
-                                app.device_scan_queue.put(('cancelled', None))
-                                return
+                    if not cancel.wait(0.8):
+                        for result in iter_scan_results(pending, lambda ip: probe_one(ip, True),
+                                                        cancel, _SCAN_RETRY_WORKERS):
                             kind, value = record(*result)
                             if kind != 'duplicate':
                                 app.device_scan_queue.put((kind, value))
                             app.device_scan_queue.put(('retry_checked', None))
-                app.device_scan_queue.put(('done', None))
+                app.device_scan_queue.put(('cancelled' if cancel.is_set() else 'done', None))
             except Exception as exc:
                 app.device_scan_queue.put(('error', str(exc)))
         threading.Thread(target=worker, daemon=True).start()
