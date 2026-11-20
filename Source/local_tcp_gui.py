@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.64'
+APP_VERSION = '0.8.65'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -3365,7 +3365,8 @@ class LocalTcpApp:
             self.w78_hex_path = selected
             self.w78_hex_name_var.set(selected.name)
             self.w78_hex_summary_var.set(
-                f'{len(package):,} 字节 | Intel HEX 校验通过 | {self.w78_target_var.get()}{eof_marker_note}')
+                f'{len(package):,} 字节 | Intel HEX 校验通过 | {self.w78_target_var.get()}\n'
+                f'{selected.name}{eof_marker_note}')
             self.w78_progress.set(0)
             self.w78_progress_text_var.set('HEX 已就绪，等待无线烧录')
             self._append_log(
