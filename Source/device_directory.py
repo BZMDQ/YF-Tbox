@@ -208,8 +208,9 @@ def route_interface(ip, interfaces):
 
 
 # 并发设有上限，避免大网段一次创建大量连接；保留两轮 TCP 探测的超时档。
-_SCAN_TCP_WORKERS = 32
-_SCAN_RETRY_WORKERS = 24
+_SCAN_TCP_WORKERS = 64
+_SCAN_RETRY_WORKERS = 32
+_SCAN_UI_BATCH = 128
 _SCAN_UDP_WINDOW = 2.0
 _SCAN_UDP_RETRY_AT = 0.7
 
@@ -785,11 +786,16 @@ def install(gui):
                 app.device_scan_queue.put(('error', str(exc)))
         threading.Thread(target=worker, daemon=True).start()
         def poll():
-            while True:
+            # 一轮 Tk 回调只消费一批，集中刷新进度、设备列表与配置快照。
+            rows_dirty = False
+            handled = False
+            next_poll_ms = 100
+            for _ in range(_SCAN_UI_BATCH):
                 try:
                     kind, value = app.device_scan_queue.get_nowait()
                 except queue.Empty:
                     break
+                handled = True
                 if kind == 'range':
                     app.device_scan_total, first, last = value
                     scope = app.device_scan_ranges.strip() or '自动识别本机、当前设备及已保存设备所在网段'
@@ -812,13 +818,11 @@ def install(gui):
                     app.device_scan_button.configure(state='normal', text='扫描设备')
                     app.stop_button.configure(state='disabled', fg_color=gui.COLORS['error_bg'],
                                               hover_color='#FECACA', text_color=gui.COLORS['error_text'])
-                    app.stop_button.configure(state='disabled', fg_color=gui.COLORS['error_bg'],
-                                              hover_color='#FECACA', text_color=gui.COLORS['error_text'])
                     app._set_status('扫描已停止')
                     app._append_log(f'扫描已停止；已确认 {len(app.device_scan_found)} 台开发板。')
                     if hasattr(app, 'device_add_status_var'):
                         app.device_add_status_var.set('扫描已停止；已确认设备保留在列表中。')
-                    continue
+                    break
                 elif kind == 'first_failed':
                     ip, stage, error, protocol = value
                     app.device_scan_checked_ips.add(ip)
@@ -835,9 +839,8 @@ def install(gui):
                     app.device_scan_reachable = len(app.device_scan_protocol_ips)
                     app.device_scan_found[ip] = info
                     app.discovered_devices.add(ip)
-                    accept_info(app, ip, info)
-                    if hasattr(app, 'device_rows'):
-                        app._render_device_rows()
+                    accept_info(app, ip, info, refresh=False)
+                    rows_dirty = True
                     name = str(info.get('device_name') or '').strip() or '未命名'
                     app._append_log(f'发现开发板：{name} | {ip}；已同步到名称配置和总览。')
                 elif kind == 'failed':
@@ -854,10 +857,8 @@ def install(gui):
                     app.device_scan_running = False
                     app.device_scan_button.configure(state='normal', text='扫描设备')
                     app.discovered_devices = set(app.device_scan_found)
-                    app._save_settings()
-                    app._refresh_device_choices()
-                    if hasattr(app, 'device_rows'):
-                        app._render_device_rows()
+                    rows_dirty = True
+                    app.device_scan_reachable = len(app.device_scan_protocol_ips)
                     count = len(app.device_scan_found)
                     history = len(set(app.device_names) - set(app.device_scan_found))
                     message = (f'扫描完成（含自动补扫）：检查 {app.device_scan_checked}/{app.device_scan_total} 个地址，协议已识别 {app.device_scan_reachable} 个，确认在线 {count} 台，历史记录未确认 {history} 台。'
@@ -868,11 +869,19 @@ def install(gui):
                     app._set_status(f'发现 {count} 台开发板' if count else '未发现开发板')
                     if hasattr(app, 'device_add_status_var'):
                         app.device_add_status_var.set(message)
-                if app.device_scan_running:
+                    break
+            else:
+                next_poll_ms = 10
+            if rows_dirty:
+                app._save_settings()
+                app._refresh_device_choices()
+                if hasattr(app, 'device_rows'):
+                    app._render_device_rows()
+            if app.device_scan_running:
+                if handled:
                     progress = (f'补扫 {app.device_scan_retry_checked}/{app.device_scan_retry_total}' if app.device_scan_phase == 2 else f'扫描 {app.device_scan_checked}/{app.device_scan_total}')
                     app.device_scan_button.configure(text=progress)
-            if app.device_scan_running:
-                app.root.after(100, poll)
+                app.root.after(next_poll_ms, poll)
         app.root.after(100, poll)
 
     def cancel_discovery(app):
@@ -889,7 +898,7 @@ def install(gui):
             except OSError:
                 pass
 
-    def accept_info(app, ip, info):
+    def accept_info(app, ip, info, refresh=True):
         if isinstance(info, dict) and ip:
             if not hasattr(app, 'overview_snapshots'):
                 app.overview_snapshots = {}
@@ -914,8 +923,9 @@ def install(gui):
         app.device_names[ip] = name
         app.discovered_device_names[ip] = name
         app.discovered_devices.add(ip)
-        app._save_settings()
-        app._refresh_device_choices()
+        if refresh:
+            app._save_settings()
+            app._refresh_device_choices()
 
     def render_info(app, body):
         original_render_info(app, body)

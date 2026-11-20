@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.68'
+APP_VERSION = '0.8.69'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -69,6 +69,8 @@ SWD_FREQUENCY_CHOICES = [
     SWD_FREQUENCY_LABELS[frequency] for frequency in SWD_FREQUENCIES_KHZ
 ]
 UI_FRAME_INTERVAL_MS = 8  # Best-effort 120 Hz UI updates on high-refresh displays.
+UI_EVENT_BATCH_LIMIT = 128
+UI_EVENT_BUDGET_S = 0.008
 SCROLL_EASING = 0.30
 PIC24_U12_PART = '24FJ256DA210'
 PIC24_U12_STAGE_HEX_ADDRESS = 0x8000
@@ -2541,8 +2543,12 @@ class LocalTcpApp:
         self.progress.set(fraction / len(self.ota_device_rows))
 
     def _poll_events(self):
+        # 高速任务事件保留 FIFO 顺序，单轮用完预算就先让出界面线程。
+        deadline = time.perf_counter() + UI_EVENT_BUDGET_S
         try:
-            while True:
+            for index in range(UI_EVENT_BATCH_LIMIT):
+                if index and time.perf_counter() >= deadline:
+                    break
                 kind, value = self.events.get_nowait()
                 if kind == 'log':
                     self._append_log(value)
@@ -2637,7 +2643,9 @@ class LocalTcpApp:
                     self.w78_percent_var.set(f'{fraction:.0%}' if total else '—')
                     phase = 2 if ('校验' in label or '完成' in label) else 1 if '写入' in label else 0
                     for i, stage in enumerate(self.w78_stage_labels):
-                        stage.configure(text_color=COLORS['teal'] if i <= phase else COLORS['muted'])
+                        color = COLORS['teal'] if i <= phase else COLORS['muted']
+                        if stage.cget('text_color') != color:
+                            stage.configure(text_color=color)
                 elif kind in ('boot_status', 'boot_progress', 'boot_confirm', 'boot_finished'):
                     boot_update_ui.handle_event(self, kind, value)
                 elif kind in ('d133_proxy_progress', 'd133_proxy_commit', 'd133_proxy_finished'):
