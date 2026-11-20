@@ -208,8 +208,8 @@ def route_interface(ip, interfaces):
 
 
 # 并发设有上限，避免大网段一次创建大量连接；保留两轮 TCP 探测的超时档。
-_SCAN_TCP_WORKERS = 64
-_SCAN_RETRY_WORKERS = 32
+_SCAN_TCP_WORKERS = 128
+_SCAN_RETRY_WORKERS = 64
 _SCAN_UI_BATCH = 128
 _SCAN_UDP_WINDOW = 2.0
 _SCAN_UDP_RETRY_AT = 0.7
