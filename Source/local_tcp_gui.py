@@ -41,7 +41,7 @@ import d133_proxy_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.58'
+APP_VERSION = '0.8.59'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -4713,12 +4713,9 @@ class LocalTcpApp:
                         if w78_timing is not None:
                             detail = w78_timing.detail()
                             actual = f'{programmed:,} 字节' if programmed else '实际写入量未上报'
-                            report = (f'F750 {version} | {hex_path.name} | W78 写入并校验完成：{actual}；'
-                                      f'工具箱轮询观测：{detail}；启动命令到完成 '
-                                      f'{observed_at - started_at:.3f} 秒（含擦除、复位及通信）。')
+                            # 耗时只显示在完成进度区，不写入操作日志或本地记录文件。
                             self._post('w78_progress', (1, 1, f'完成：{actual}｜{detail}（轮询观测）'))
-                            self._post('log', report)
-                            self._save_w78_burn_log(report)
+                            self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
                         else:
                             self._post('w78_progress', (capacity, capacity, f'{name or hex_path.name} | APROM 写入并校验完成'))
                             self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
@@ -4734,18 +4731,6 @@ class LocalTcpApp:
 
         self._start_task('无线烧录', action,
                          require_connection=False, host_override=host_override)
-
-    def _save_w78_burn_log(self, report):
-        # 在用户目录追加每次成功记录，重开工具箱仍能对比；日志写入失败不影响烧录结果。
-        folder = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'ResearchToolbox' / 'Logs'
-        path = folder / 'W78_burn.log'
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-            with path.open('a', encoding='utf-8') as handle:
-                handle.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {report}\n')
-            self._post('log', f'W78 对比记录已保存：{path}')
-        except OSError as exc:
-            self._post('log', f'无法保存 W78 对比记录：{exc}')
 
     @contextmanager
     def _ota_batch_session(self, args, key, stop_event, host, total, digest, on_info):
