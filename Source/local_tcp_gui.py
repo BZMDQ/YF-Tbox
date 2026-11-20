@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.63'
+APP_VERSION = '0.8.64'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -3359,16 +3359,17 @@ class LocalTcpApp:
             selected = Path(path).resolve()
             from pic24_hex import validate_pic24_hex
             package = validate_pic24_hex(selected) if self.w78_target_var.get().startswith('PIC24') else validate_w78_hex(selected)
-            device_name = validate_w78_filename(selected).decode('ascii')
+            # 校验兼容传输名，但 Windows 界面只显示原始文件名。
+            validate_w78_filename(selected)
             eof_marker_note = ' | 已忽略末尾 Ctrl+Z' if selected.stat().st_size != len(package) else ''
             self.w78_hex_path = selected
             self.w78_hex_name_var.set(selected.name)
             self.w78_hex_summary_var.set(
-                f'{len(package):,} 字节 | Intel HEX 校验通过 | {self.w78_target_var.get()} | 设备端名称 {device_name}{eof_marker_note}')
+                f'{len(package):,} 字节 | Intel HEX 校验通过 | {self.w78_target_var.get()}{eof_marker_note}')
             self.w78_progress.set(0)
             self.w78_progress_text_var.set('HEX 已就绪，等待无线烧录')
             self._append_log(
-                f'已选择 W78 HEX：{selected.name}（{len(package):,} 字节，记录校验通过；设备端名称 {device_name}{eof_marker_note}）')
+                f'已选择 HEX：{selected.name}（{len(package):,} 字节，记录校验通过{eof_marker_note}）')
         except Exception as exc:
             messagebox.showerror('W78 HEX 无效', str(exc), parent=self.root)
 
@@ -4797,7 +4798,6 @@ class LocalTcpApp:
                         # 非预期固件行为时回退为纯字节显示，最终范围以板端为准。
                         if capacity is not None and programmed > capacity:
                             capacity = None
-                    name = body[24:72].split(b'\0', 1)[0].decode('ascii', errors='replace')
                     if state != last_reported_state:
                         phase = state_names.get(state, '校验通过（状态 13）' if
                                                 not pic24 and state == W78_STATE_DONE else f'状态 {state}')
@@ -4818,10 +4818,10 @@ class LocalTcpApp:
                             detail = w78_timing.detail()
                             actual = f'{programmed:,} 字节' if programmed else '实际写入量未上报'
                             # 耗时只显示在完成进度区，不写入操作日志或本地记录文件。
-                            self._post('w78_progress', (1, 1, f'完成：{actual}｜{detail}（轮询观测）'))
+                            self._post('w78_progress', (1, 1, f'{hex_path.name} · 完成：{actual}｜{detail}（轮询观测）'))
                             self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
                         else:
-                            self._post('w78_progress', (capacity, capacity, f'{name or hex_path.name} | APROM 写入并校验完成'))
+                            self._post('w78_progress', (capacity, capacity, f'{hex_path.name} · 写入并校验完成'))
                             self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
                         self._post('status', target_name + ' 无线烧录完成')
                         return
