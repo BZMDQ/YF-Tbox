@@ -38,10 +38,11 @@ from local_tcp_client import (
 )
 import boot_update_ui
 import d133_proxy_ui
+from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.61'
+APP_VERSION = '0.8.62'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1372,12 +1373,20 @@ class LocalTcpApp:
         self.overview_rows = ctk.CTkFrame(devices, fg_color='transparent')
         self.overview_rows.pack(fill='x', padx=13, pady=(0, 11))
         recent = self._page_card(page, 1)
-        ctk.CTkLabel(recent, text='最近操作', font=self._font(16, 'bold')).pack(
+        ctk.CTkLabel(recent, text='最近操作 · 24 小时', font=self._font(16, 'bold')).pack(
             anchor='w', padx=16, pady=(13, 5))
-        self.recent_operation_vars = [tk.StringVar(master=self.root, value='—' if i == 0 else '') for i in range(3)]
-        for v in self.recent_operation_vars:
-            row = ctk.CTkLabel(recent, textvariable=v, height=29, anchor='w', text_color=COLORS['muted'])
-            row.pack(fill='x', padx=16, pady=(0, 4))
+        self.history_view = ctk.CTkTextbox(recent, height=145, wrap='word', corner_radius=8,
+            fg_color=COLORS['card'], text_color=COLORS['text'], font=self._font(12))
+        self.history_view.pack(fill='x', padx=12, pady=(0, 10))
+        self.operation_history = None
+        self.history_rows = None
+        self.history_warned = False
+        try:
+            self.operation_history = OperationHistory(settings_file().with_name('operation_history.sqlite3'))
+        except (HistoryError, OSError):
+            pass
+        self._refresh_history()
+        self.root.after(60_000, self._age_history)
         self.home_connect_card = self._rail_card('home', '设备连接')
         fields = ctk.CTkFrame(self.home_connect_card, fg_color='transparent')
         self.home_target_fields = fields
@@ -2444,10 +2453,58 @@ class LocalTcpApp:
         timestamp = time.strftime('%H:%M:%S')
         self.log.insert('end', f'[{timestamp}] {message}\n')
         self.log.see('end')
-        if message.startswith('开始：') and hasattr(self, 'recent_operation_vars'):
-            for i in range(len(self.recent_operation_vars) - 1, 0, -1):
-                self.recent_operation_vars[i].set(self.recent_operation_vars[i - 1].get())
-            self.recent_operation_vars[0].set(f'{timestamp}   {message[3:]}')
+
+    def _refresh_history(self):
+        store = getattr(self, 'operation_history', None)
+        if store is None:
+            text = '无法读取操作记录'
+        else:
+            try:
+                records = store.recent()
+            except (HistoryError, OSError):
+                return
+            # 分页区域只显示时间和摘要；无变化时保留滚动位置。
+            if records == self.history_rows:
+                return
+            self.history_rows = records
+            text = '\n\n'.join(
+                '  '.join(part for part in (
+                    time.strftime('%m-%d %H:%M', time.localtime(stamp)), action, target, state) if part)
+                for stamp, action, target, state in records) or '暂无操作'
+        self.history_view.configure(state='normal')
+        self.history_view.delete('1.0', 'end')
+        self.history_view.insert('1.0', text)
+        self.history_view.configure(state='disabled')
+
+    def _age_history(self):
+        self._refresh_history()
+        self.root.after(60_000, self._age_history)
+
+    def _history_start(self, action, target=''):
+        store = getattr(self, 'operation_history', None)
+        if store is None:
+            return None
+        try:
+            record = store.start(action, target)
+            self._refresh_history()
+            return record
+        except (HistoryError, OSError):
+            self._history_warning()
+            return None
+
+    def _history_finish(self, record, state):
+        if record is None:
+            return
+        try:
+            self.operation_history.finish(record, state)
+            self._refresh_history()
+        except (HistoryError, OSError):
+            self._history_warning()
+
+    def _history_warning(self):
+        if not self.history_warned:
+            self.history_warned = True
+            self._append_log('无法保存最近操作。')
 
     def _clear_log(self):
         self.log.delete('1.0', 'end')
@@ -2585,6 +2642,8 @@ class LocalTcpApp:
                     boot_update_ui.handle_event(self, kind, value)
                 elif kind in ('d133_proxy_progress', 'd133_proxy_commit', 'd133_proxy_finished'):
                     d133_proxy_ui.handle_event(self, kind, value)
+                elif kind == 'history_finish':
+                    self._history_finish(*value)
                 elif kind == 'finished':
                     if value is self.stop_event:
                         self.w78_program_started = False
@@ -2877,6 +2936,7 @@ class LocalTcpApp:
         self.is_running = True
         self.stop_event = threading.Event()
         stop_event = self.stop_event
+        record = None
         try:
             self._set_controls_enabled(False)
             self._refresh_u12_recovery_view()
@@ -2898,29 +2958,40 @@ class LocalTcpApp:
                 self.mplab_progress.start()
                 self.mplab_progress_indeterminate = True
             self._append_log(f'开始：{title}')
+            record = self._history_start(title, args.host if args is not None else '')
     
             def worker():
+                # 正常返回只说明工具箱任务结束，不能证明每个目标升级成功。
+                result = '已结束'
                 try:
                     action(args, key, stop_event)
+                    if stop_event.is_set():
+                        result = '已停止等待'
                 except InterruptedError:
+                    result = '已停止等待'
                     self._post('log', '操作已停止。')
                     self._post('status', '已停止')
                 except Exception as exc:
                     if stop_event.is_set():
+                        result = '已停止等待'
                         self._post('log', '操作已停止。')
                         self._post('status', '已停止')
                     else:
+                        result = '失败'
                         self._post('log', f'操作失败：{self._friendly_error(exc, args)}')
                         if isinstance(exc, socket.timeout):
                             self._post('status', '连接超时')
                         else:
                             self._post('status', '操作失败')
                 finally:
+                    if record is not None:
+                        self._post('history_finish', (record, result))
                     self._post('finished', stop_event)
     
             self.task_thread = threading.Thread(target=worker, name='LocalTCP-worker', daemon=True)
             self.task_thread.start()
         except Exception as exc:
+            self._history_finish(record, '未启动')
             self._finish_task()
             self._set_status("任务未启动")
             self._append_log(f"任务启动失败：{exc}")

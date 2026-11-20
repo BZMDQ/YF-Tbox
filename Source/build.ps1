@@ -16,7 +16,7 @@ if ([string]::IsNullOrWhiteSpace($WorkPath)) {
     $work = [IO.Path]::GetFullPath($WorkPath)
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $root '研发工具箱_0.8.61.exe'
+    $OutputPath = Join-Path $root '研发工具箱_0.8.62.exe'
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $dist = Split-Path -Parent $output
@@ -80,6 +80,7 @@ $arguments = @(
     '--specpath', $work,
     '--paths', $source,
     '--hidden-import', 'argparse',
+    '--hidden-import', 'operation_history',
     '--hidden-import', 'pic24_hex',
     '--hidden-import', 'd133_ota_ui',
     '--hidden-import', 'd133_ota_client',

@@ -665,6 +665,7 @@ def install(gui):
             messagebox.showerror('扫描范围无效', str(exc), parent=app.root)
             return
         app.device_scan_running = True
+        app.device_scan_history_id = app._history_start('扫描设备')
         app.device_scan_found = {}
         app.device_online_ips.clear()
         if hasattr(app, 'device_rows'):
@@ -790,6 +791,7 @@ def install(gui):
                 elif kind == 'retry_checked':
                     app.device_scan_retry_checked += 1
                 elif kind == 'cancelled':
+                    app._history_finish(app.device_scan_history_id, '已停止')
                     app.device_scan_running = False
                     app.device_scan_button.configure(state='normal', text='扫描设备')
                     app.stop_button.configure(state='disabled', fg_color=gui.COLORS['error_bg'],
@@ -832,6 +834,7 @@ def install(gui):
                     if ip == current or ip in known:
                         app._append_log(f'[{ip}] 扫描未识别：{stage}：{error}')
                 else:
+                    app._history_finish(app.device_scan_history_id, '已结束' if kind == 'done' else '失败')
                     app.device_scan_running = False
                     app.device_scan_button.configure(state='normal', text='扫描设备')
                     app.discovered_devices = set(app.device_scan_found)
