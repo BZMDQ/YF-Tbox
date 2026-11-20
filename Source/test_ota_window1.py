@@ -1,4 +1,4 @@
-"""验证系统OTA固定窗口1，不向仍运行1.4.37的开发板协商窗口2。"""
+"""验证系统 OTA 窗口 2、旧固件回退，以及写入回执的边界。"""
 import select
 import socket
 import struct
@@ -44,7 +44,7 @@ def server(handler):
 def read_frame(connection):
     header = client.exact(connection, 20)
     magic, op, offset, size, _ = client.HEADER.unpack(header)
-    assert magic == b'LNET' and size <= 16384
+    assert magic == b'LNET' and size <= 32768
     return op, offset, client.exact(connection, size)
 
 
@@ -76,6 +76,48 @@ class WindowOne(unittest.TestCase):
             self.assertEqual(modes, [(size, 1)])
             self.assertEqual(progress[-1], len(package))
             self.assertEqual(info, [b'{}'])
+
+    def test_32k_window2_sends_two_and_refills_after_first_ack(self):
+        size = 32768
+        package = b'a' * size + b'b' * size + b'last'
+        modes, progress = [], []
+
+        def handler(connection):
+            self.assertEqual(read_frame(connection), (35, 0, b''))
+            connection.sendall(client.frame(0x80000023, payload=struct.pack('<II', size, 2)))
+            self.assertEqual(read_frame(connection), (3, 0, b'a' * size))
+            self.assertEqual(read_frame(connection), (3, size, b'b' * size))
+            self.assertFalse(select.select([connection], [], [], 0.02)[0],
+                             '确认前多发了第三块')
+            connection.sendall(client.frame(0x80000003, payload=struct.pack('<I', size)))
+            self.assertEqual(read_frame(connection), (3, size * 2, b'last'))
+            for offset in (size * 2, len(package)):
+                connection.sendall(client.frame(0x80000003, payload=struct.pack('<I', offset)))
+
+        with server(handler) as connection:
+            client.upload_ota_stream(connection, package, chunk_size=size, window=2,
+                                     on_mode=lambda *value: modes.append(value),
+                                     on_progress=progress.append)
+        self.assertEqual(modes, [(32768, 2)])
+        self.assertEqual(progress, [32768, 65536, len(package)])
+
+    def test_unsupported_capabilities_falls_back_before_first_write(self):
+        package = b'x' * 16384 + b'tail'
+        modes = []
+
+        def handler(connection):
+            self.assertEqual(read_frame(connection), (35, 0, b''))
+            connection.sendall(client.frame(0x80000023, offset=11))
+            self.assertEqual(read_frame(connection), (3, 0, package[:16384]))
+            self.assertFalse(select.select([connection], [], [], 0.02)[0])
+            connection.sendall(client.frame(0x80000003, payload=struct.pack('<I', 16384)))
+            self.assertEqual(read_frame(connection), (3, 16384, b'tail'))
+            connection.sendall(client.frame(0x80000003, payload=struct.pack('<I', len(package))))
+
+        with server(handler) as connection:
+            client.upload_ota_stream(connection, package, chunk_size=32768, window=2,
+                                     on_mode=lambda *value: modes.append(value))
+        self.assertEqual(modes, [(16384, 1)])
 
     def test_invalid_ack_or_rejection_never_sends_next_frame(self):
         for failure in ('offset', 'crc', 'reject'):

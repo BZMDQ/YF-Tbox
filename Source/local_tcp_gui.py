@@ -30,7 +30,7 @@ import customtkinter as ctk
 from PIL import Image, ImageOps
 
 from local_tcp_client import (
-    DeviceError, OTA_CHUNK_SIZE, OTA_LEGACY_CHUNK_SIZE, W78_CHUNK_SIZE,
+    DeviceError, OTA_MAX_CHUNK_SIZE, OTA_LEGACY_CHUNK_SIZE, OTA_TRANSFER_WINDOW, W78_CHUNK_SIZE,
     W78_LOGICAL_CHUNK_SIZES, SocketReader,
     W78_STATE_DONE, W78_STATE_FAILED, bind_lan_route, connect, frame, receive, request,
     upload_w78_window, validate_package, validate_w78_filename, validate_w78_hex, parse_device_info,
@@ -42,14 +42,14 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.66'
+APP_VERSION = '0.8.67'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
 W78_STATUS_INTERVAL = 0.10  # 顺序查询，快速任务更容易采到；不改变烧录传输窗口。
 WIRELESS_HEX_MODE = 'hex'
 WIRELESS_D133_MODE = 'd133'
-TRANSFER_CHUNK_SIZES = (1024, 2048, 4096, 8192, 16384)
+TRANSFER_CHUNK_SIZES = (1024, 2048, 4096, 8192, 16384, OTA_MAX_CHUNK_SIZE)
 SITE_RESOURCE_SLUG = re.compile(r'^[a-z0-9]+(?:-[a-z0-9]+)*$')
 SITE_MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 OTA_FILENAME = 'STM32F750_1.0.0.ota.bin'
@@ -739,11 +739,11 @@ class LocalTcpApp:
         settings = self._load_settings()
         self.ui_language = settings.get('language', 'zh-CN')
         try:
-            self.ota_chunk_size = int(settings.get('ota_chunk_size', OTA_CHUNK_SIZE))
+            self.ota_chunk_size = int(settings.get('ota_chunk_size', OTA_MAX_CHUNK_SIZE))
         except (TypeError, ValueError):
-            self.ota_chunk_size = OTA_CHUNK_SIZE
+            self.ota_chunk_size = OTA_MAX_CHUNK_SIZE
         if self.ota_chunk_size not in TRANSFER_CHUNK_SIZES:
-            self.ota_chunk_size = OTA_CHUNK_SIZE
+            self.ota_chunk_size = OTA_MAX_CHUNK_SIZE
         try:
             self.w78_chunk_size = int(settings.get('w78_chunk_size', W78_CHUNK_SIZE))
         except (TypeError, ValueError):
@@ -1007,12 +1007,12 @@ class LocalTcpApp:
             master=dialog, value=f'{self.w78_chunk_size // 1024} KiB')
         add_setting_row('界面语言', self.settings_language_var,
                         ['简体中文', '繁體中文'])
-        add_setting_row('固件升级发送速度', self.settings_ota_chunk_var,
-                        ['1 KiB', '2 KiB', '4 KiB', '8 KiB', '16 KiB'])
+        add_setting_row('F750 系统 OTA 分片', self.settings_ota_chunk_var,
+                        [f'{size // 1024} KiB' for size in TRANSFER_CHUNK_SIZES])
         add_setting_row('无线烧录逻辑块大小', self.settings_w78_chunk_var,
                         ['4 KiB', '8 KiB', '16 KiB', '32 KiB'])
         ctk.CTkLabel(
-            card, text='32 KiB 单帧需 F750 1.4.75；旧固件自动回退。',
+            card, text='系统 OTA 的 32 KiB 和窗口 2 需 F750 1.4.78；旧固件自动回退。',
             font=self._font(9), text_color=COLORS['muted'], anchor='w',
         ).pack(fill='x', padx=18, pady=(9, 5))
 
@@ -1044,7 +1044,7 @@ class LocalTcpApp:
             except (TypeError, ValueError, IndexError):
                 messagebox.showerror('设置无效', '请选择有效的发送速度。', parent=dialog)
                 return
-            if ota_kib not in (1, 2, 4, 8, 16) or w78_kib not in (4, 8, 16, 32):
+            if ota_kib * 1024 not in TRANSFER_CHUNK_SIZES or w78_kib * 1024 not in W78_LOGICAL_CHUNK_SIZES:
                 messagebox.showerror('设置无效', '请选择有效的发送速度。', parent=dialog)
                 return
             try:
@@ -4952,13 +4952,13 @@ class LocalTcpApp:
                                 self._post('ota_target_status', (host, '正在传输'))
                                 upload_ota_stream(
                                     sock, package, chunk_size=chunk_size,
+                                    window=1 if chunk_size == OTA_LEGACY_CHUNK_SIZE else OTA_TRANSFER_WINDOW,
                                     on_info=info_callback, send_lock=self.ota_send_lock,
                                     cancel=stop_event,
                                     on_progress=lambda written: self._post(
                                         'ota_target_progress', (host, written, total)),
                                     on_mode=lambda size, window: self._post(
-                                        'log', f'[{host}] OTA 分片 {size} 字节，窗口 {window}；'
-                                        + ('DMA 流水接收已启用。' if window == 2 else '固定窗口1，逐片确认。')),
+                                        'log', f'[{host}] OTA 分片 {size} 字节，窗口 {window}，按偏移逐片确认。'),
                                 )
                                 if stop_event.is_set():
                                     raise InterruptedError()

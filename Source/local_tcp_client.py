@@ -26,6 +26,9 @@ def parse_device_info(body):
 
 HEADER = struct.Struct('<4sIIII')
 OTA_CHUNK_SIZE = 16384
+OTA_MAX_CHUNK_SIZE = 32768
+OTA_TRANSFER_WINDOW = 2
+OTA_TRANSFER_CAPS_OP = 35
 OTA_LEGACY_CHUNK_SIZE = 1024
 OTA_RAM_SIZE = 0x3C000
 W78_MAX_HEX_SIZE = 512 * 1024
@@ -133,24 +136,63 @@ def request(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
 
 
 def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None,
-                      on_info=None, send_lock=None, cancel=None, on_mode=None):
-    """系统OTA固定窗口1；每片收到累计ACK之后才发送下一片，不协商窗口2。"""
-    if not 0 < chunk_size <= OTA_CHUNK_SIZE:
-        raise ValueError('OTA分片大小必须为1到16384字节')
+                      on_info=None, send_lock=None, cancel=None, on_mode=None, window=1):
+    """按设备能力使用窗口 1 或 2，按 Flash 写入回执推进进度。"""
+    if not 0 < chunk_size <= OTA_MAX_CHUNK_SIZE or window not in (1, OTA_TRANSFER_WINDOW):
+        raise ValueError('系统 OTA 分片或窗口大小无效')
     if cancel is not None and cancel.is_set():
         raise InterruptedError()
+    if chunk_size > OTA_CHUNK_SIZE or window > 1:
+        # 查询能力不修改槽位。旧固件返回不支持或未知命令的权限错误。
+        try:
+            caps = request(sock, OTA_TRANSFER_CAPS_OP, on_info=on_info, send_lock=send_lock)
+        except DeviceError as exc:
+            if exc.status not in (11, 13):
+                raise
+            capacity, supported_window = OTA_CHUNK_SIZE, 1
+        else:
+            if len(caps) != 8:
+                raise ValueError('设备返回的系统 OTA 能力长度无效')
+            capacity, supported_window = struct.unpack('<II', caps)
+            if capacity not in (OTA_CHUNK_SIZE, OTA_MAX_CHUNK_SIZE) or supported_window not in (1, OTA_TRANSFER_WINDOW):
+                raise ValueError('设备返回的系统 OTA 能力无效')
+        chunk_size = min(chunk_size, capacity)
+        window = min(window, supported_window)
     if on_mode:
-        on_mode(chunk_size, 1)
-    for offset in range(0, len(package), chunk_size):
+        on_mode(chunk_size, window)
+
+    next_offset = written = 0
+    pending = []
+    while written < len(package):
         if cancel is not None and cancel.is_set():
             raise InterruptedError()
-        block = package[offset:offset + chunk_size]
-        # 只发送一次，异常应答直接停止，禁止在写入结果不明时自动重放。
-        ack = request(sock, 3, offset=offset, payload=block,
-                      on_info=on_info, send_lock=send_lock)
-        written = offset + len(block)
-        if len(ack) != 4 or struct.unpack('<I', ack)[0] != written:
-            raise ValueError('OTA确认偏移或长度不匹配')
+        outgoing = []
+        while len(pending) < window and next_offset < len(package):
+            end = min(len(package), next_offset + chunk_size)
+            outgoing.append(frame(3, next_offset, package[next_offset:end]))
+            pending.append(end)
+            next_offset = end
+        if outgoing:
+            packets = b''.join(outgoing)
+            if send_lock is None:
+                sock.sendall(packets)
+            else:
+                with send_lock:
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError()
+                    sock.sendall(packets)
+
+        response, ack = receive(sock)
+        if response == 0x80000001:
+            if on_info:
+                on_info(ack)
+            else:
+                print(ack.decode('utf-8'))
+            continue
+        # 只接受队首块的已写入偏移。回执异常立即停止，不自动重放不确定的写入。
+        if response != 0x80000003 or len(ack) != 4 or struct.unpack('<I', ack)[0] != pending[0]:
+            raise ValueError('OTA确认命令、偏移或长度不匹配')
+        written = pending.pop(0)
         if on_progress:
             on_progress(written)
 
@@ -701,7 +743,7 @@ def main():
             digest = hashlib.md5(package).hexdigest().encode('ascii')
             request(sock, 2, payload=struct.pack('<I', len(package)) + digest)
             upload_ota_stream(
-                sock, package,
+                sock, package, chunk_size=OTA_MAX_CHUNK_SIZE, window=OTA_TRANSFER_WINDOW,
                 on_progress=lambda written: print(
                     f'\r写入 W25：{written}/{len(package)}', end='', flush=True))
             request(sock, 4)
