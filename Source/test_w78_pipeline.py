@@ -60,6 +60,11 @@ def test_raw_window_two_32k_logical_blocks_and_retry():
         try:
             op, target, hello = recv_frame(device)
             assert op == 31 and target == 1 and len(hello) == 16
+            # 模拟只支持逐帧回执的旧板，先拒绝双帧确认扩展。
+            assert struct.unpack('<4I', hello) == (session, 2, logical_chunk, 2)
+            send_reply(device, 31 | 0x80000000, 4)
+            op, target, hello = recv_frame(device)
+            assert (op, target) == (31, 1)
             sid, requested_window, requested_frame, feature = struct.unpack('<4I', hello)
             assert (sid, requested_window, requested_frame, feature) == (
                 session, 2, logical_chunk, 1)
@@ -108,6 +113,43 @@ def test_raw_window_two_32k_logical_blocks_and_retry():
     assert sorted(received) == [0, 1, 2, 3]
     assert result == (logical_chunk, FRAME_DATA_SIZE, 2, 1, True)
     assert progress == [logical_chunk, len(package)]
+
+
+def test_pair_ack_retries_only_unconfirmed_frame():
+    host, device = socket.socketpair()
+    host.settimeout(10)
+    device.settimeout(10)
+    session, chunk = 0x26AB91, 32768
+    package = b'A' * chunk + b'B' * chunk + b'C' * 19
+    errors, progress, retries = [], [], []
+
+    def peer():
+        try:
+            assert recv_frame(device) == (31, 1, struct.pack('<4I', session, 2, chunk, 2))
+            send_reply(device, 31 | 0x80000000, 0, struct.pack('<6I', session, chunk, 2, 0, 0, 2))
+            assert recv_frame(device) == (33, session << 8, b'A' * chunk)
+            assert recv_frame(device) == (33, (session << 8) | 1, b'B' * chunk)
+            # 第一帧已经写入。第二帧 CRC 被拒绝，只重传第二帧。
+            send_reply(device, 33 | 0x80000000, 0, make_ack(session, 1, 1, chunk, 2, 3))
+            assert recv_frame(device) == (33, (session << 8) | 1, b'B' * chunk)
+            assert recv_frame(device) == (33, (session << 8) | 2, b'C' * 19)
+            # 单个累计 ACK 确认补发帧和最后的短帧。
+            send_reply(device, 33 | 0x80000000, 0, make_ack(session, 2, 3, len(package), 2, 0))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            device.close()
+
+    worker = threading.Thread(target=peer, daemon=True)
+    worker.start()
+    with host:
+        result = upload_w78_window(host, package, chunk, session, None, target=1,
+                                   on_progress=lambda offset, total: progress.append(offset),
+                                   on_retry=retries.append)
+    worker.join(2)
+    assert not worker.is_alive() and not errors, errors
+    assert result == (chunk, chunk, 2, 1, True)
+    assert progress == [chunk, len(package)] and retries == ['crc']
 
 
 def test_old_16k_payload_pipeline_fallback():
@@ -204,6 +246,7 @@ def test_late_pipeline_ack_does_not_break_start_command():
 
 
 if __name__ == '__main__':
+    test_pair_ack_retries_only_unconfirmed_frame()
     test_raw_window_two_32k_logical_blocks_and_retry()
     test_old_16k_payload_pipeline_fallback()
     test_legacy_sequential_fallback()

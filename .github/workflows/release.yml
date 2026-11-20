@@ -34,6 +34,8 @@ jobs:
         run: |
           python -m unittest test_connection_transport test_gui_connection_policy test_ota_window1 test_boot_update test_d133_proxy test_wireless_page -v
           if ($LASTEXITCODE -ne 0) { throw 'Connection or transfer checks failed.' }
+          python test_w78_pipeline.py
+          if ($LASTEXITCODE -ne 0) { throw 'HEX pipeline checks failed.' }
       - name: Build and check application
         id: build
         shell: pwsh
@@ -82,7 +84,7 @@ jobs:
             手动下载安装程序，安装完整工具箱应用运行文件及源码，不生成额外 ZIP。
             保留既有 CubeProgrammer、ST-LINK 驱动和用户配置；此公共包不分发厂商工具。
             0.8.57 从“03 无线烧录”进入 D133 USB A/B。F750 1.4.64（ESP32-C3 被动接收）与 D133 1.0.173 协商后支持 128 KiB、窗口 2。每个逻辑块拆成最多八个 16 KiB 帧，逐块核对累计确认。旧固件可协商 64 KiB、32 KiB 或 4 KiB。D133 继续校验签名、写入非活动槽，重启后核对新版本、槽位和健康状态。
-            W78 / PIC24 HEX 从“03 无线烧录”进入，D133 TCP 直连从“04 固件升级”进入。
+            W78 / PIC24 HEX 从“03 无线烧录”进入。0.8.66 搭配 F750 1.4.77，支持 32 KiB 帧、窗口 2、双帧累计确认与按缺失序号重传。旧固件自动回退。D133 TCP 直连保留在“04 固件升级”。
             已完成主机连接策略和打包界面检查；实际开发板与公司网络的速度和长时间稳定性需现场验证。
             工具箱不会自动检查、下载或安装更新。
           files: |
