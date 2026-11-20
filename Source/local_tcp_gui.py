@@ -33,7 +33,7 @@ from local_tcp_client import (
     DeviceError, OTA_MAX_CHUNK_SIZE, OTA_LEGACY_CHUNK_SIZE, OTA_TRANSFER_WINDOW, W78_CHUNK_SIZE,
     W78_LOGICAL_CHUNK_SIZES, SocketReader,
     W78_STATE_DONE, W78_STATE_FAILED, bind_lan_route, connect, frame, receive, request,
-    upload_w78_window, validate_package, validate_w78_filename, validate_w78_hex, parse_device_info,
+    upload_w78_window, validate_package, check_ota_layout, validate_w78_filename, validate_w78_hex, parse_device_info,
     request_wait, upload_ota_stream, W78StageTiming,
 )
 import boot_update_ui
@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.70'
+APP_VERSION = '0.8.71'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -4846,7 +4846,7 @@ class LocalTcpApp:
                          require_connection=False, host_override=host_override)
 
     @contextmanager
-    def _ota_batch_session(self, args, key, stop_event, host, total, digest, on_info):
+    def _ota_batch_session(self, args, key, stop_event, host, total, digest, on_info, layout):
         for attempt in range(5):
             if stop_event.is_set():
                 raise InterruptedError()
@@ -4859,6 +4859,7 @@ class LocalTcpApp:
                 self.active_ota_sockets[host] = sock
                 self.ota_socket_cancel_allowed[host] = True
             try:
+                check_ota_layout(sock, layout, on_info=on_info, send_lock=self.ota_send_lock)
                 if not key:
                     self._post('ota_target_status', (host, '等待设备端确认'))
                     self._post(
@@ -4867,7 +4868,7 @@ class LocalTcpApp:
                     )
                 try:
                     request(
-                        sock, 2, payload=struct.pack('<I', total) + digest,
+                        sock, 2, offset=2 if layout == 2 else 0, payload=struct.pack('<I', total) + digest,
                         on_info=on_info, send_lock=self.ota_send_lock,
                     )
                 except DeviceError as exc:
@@ -4928,6 +4929,7 @@ class LocalTcpApp:
         def action(_args, _key, stop_event):
             package = package_path.read_bytes()
             version = validate_package(package)
+            layout = struct.unpack_from('<I', package, 8)[0]
             digest = hashlib.md5(package).hexdigest().encode('ascii')
             total = len(package)
             self._post('ota_batch_status', f'正在并行升级 | {len(hosts)} 台设备')
@@ -4954,7 +4956,7 @@ class LocalTcpApp:
                     for chunk_size in chunk_sizes:
                         try:
                             with self._ota_batch_session(
-                                args, key, stop_event, host, total, digest, info_callback,
+                                args, key, stop_event, host, total, digest, info_callback, layout,
                             ) as sock:
                                 sock.settimeout(120)
                                 self._post('ota_target_status', (host, '正在传输'))

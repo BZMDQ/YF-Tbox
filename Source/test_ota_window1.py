@@ -119,6 +119,27 @@ class WindowOne(unittest.TestCase):
                                      on_mode=lambda *value: modes.append(value))
         self.assertEqual(modes, [(16384, 1)])
 
+    def test_layout_preflight_refuses_wrong_board_before_begin(self):
+        def handler(connection):
+            self.assertEqual(read_frame(connection), (36, 0, b''))
+            connection.sendall(client.frame(0x80000024, payload=struct.pack('<I', 2)))
+            self.assertEqual(connection.recv(1), b'')
+
+        with server(handler) as connection:
+            with self.assertRaisesRegex(ValueError, '不匹配'):
+                client.check_ota_layout(connection, 1)
+
+    def test_layout_preflight_legacy_on_unsupported_query(self):
+        def handler(connection):
+            self.assertEqual(read_frame(connection), (36, 0, b''))
+            connection.sendall(client.frame(0x80000024, offset=11))
+
+        with server(handler) as connection:
+            client.check_ota_layout(connection, 1)
+        with server(handler) as connection:
+            with self.assertRaisesRegex(ValueError, '不匹配'):
+                client.check_ota_layout(connection, 2)
+
     def test_invalid_ack_or_rejection_never_sends_next_frame(self):
         for failure in ('offset', 'crc', 'reject'):
             def handler(connection):

@@ -29,6 +29,7 @@ OTA_CHUNK_SIZE = 16384
 OTA_MAX_CHUNK_SIZE = 32768
 OTA_TRANSFER_WINDOW = 2
 OTA_TRANSFER_CAPS_OP = 35
+OTA_LAYOUT_OP = 36
 OTA_LEGACY_CHUNK_SIZE = 1024
 OTA_RAM_SIZE = 0x3C000
 W78_MAX_HEX_SIZE = 512 * 1024
@@ -59,6 +60,7 @@ class DeviceError(RuntimeError):
             8: '（W78 Intel HEX 格式、校验和或 APROM 地址错误）',
             9: '（升级包校验失败）',
             13: '（Local TCP Key 认证失败）',
+            16: '（系统 OTA 分区布局不匹配）',
         }.get(status, '')
         super().__init__(f'设备返回错误 {status}{detail}')
 
@@ -419,13 +421,31 @@ def upload_w78_window(sock, package, logical_chunk_size, session_id, stop_event,
     return logical_chunk_size, frame_size, window, retries_total, raw_mode
 
 
+def check_ota_layout(sock, package_layout, on_info=None, send_lock=None):
+    """写入前查询设备布局，旧固件不认识该只读命令时视为布局 1。"""
+    try:
+        body = request(sock, OTA_LAYOUT_OP, on_info=on_info, send_lock=send_lock)
+    except DeviceError as exc:
+        if exc.status not in (11, 13):
+            raise
+        target_layout = 1
+    else:
+        if len(body) != 4:
+            raise ValueError('设备返回的 OTA 布局无效')
+        target_layout, = struct.unpack('<I', body)
+    if target_layout != package_layout:
+        raise ValueError(f'升级包布局 {package_layout} 与开发板布局 {target_layout} 不匹配。首次切换请使用配套工厂 HEX。')
+
+
 def validate_package(package):
     if len(package) < 128:
         raise ValueError('升级包太短')
     magic, fmt, hsize, total, load, app, assets, ac, rc, pc, version, _ = struct.unpack_from('<8s9I20s60s', package)
-    if magic != b'F750OTA1' or fmt != 1 or hsize != 128 or total != len(package):
+    if (magic, fmt) not in ((b'F750OTA1', 1), (b'F750OTA2', 2)) or hsize != 128 or total != len(package):
         raise ValueError('请选择完整的 STM32F750_版本.ota.bin')
-    if load != 0x20010000 or not 8 <= app <= OTA_RAM_SIZE or assets > 0x380000 or total != 128 + app + assets:
+    max_assets, max_slot = (0x4C0000, 0x500000) if fmt == 2 else (0x380000, 0x400000)
+    if (load != 0x20010000 or not 8 <= app <= OTA_RAM_SIZE or assets > max_assets
+            or total != 128 + app + assets or total > max_slot or (fmt == 2 and any(package[64:80]))):
         raise ValueError('升级包分区尺寸错误')
     for data, expected in ((package[:124], struct.unpack_from('<I', package, 124)[0]),
                            (package[128:128+app], ac), (package[128+app:], rc), (package[128:], pc)):
@@ -741,7 +761,9 @@ def main():
             if not key:
                 print('未提供 Key；开始 OTA 后，请在开发板屏幕确认升级请求。')
             digest = hashlib.md5(package).hexdigest().encode('ascii')
-            request(sock, 2, payload=struct.pack('<I', len(package)) + digest)
+            layout = struct.unpack_from('<I', package, 8)[0]
+            check_ota_layout(sock, layout)
+            request(sock, 2, offset=2 if layout == 2 else 0, payload=struct.pack('<I', len(package)) + digest)
             upload_ota_stream(
                 sock, package, chunk_size=OTA_MAX_CHUNK_SIZE, window=OTA_TRANSFER_WINDOW,
                 on_progress=lambda written: print(

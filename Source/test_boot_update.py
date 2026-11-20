@@ -131,6 +131,19 @@ class PackageTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_boot_layout_mismatch_stops_before_begin(self):
+        old_package = boot.build_package(image())
+        new_image = bytearray(image())
+        marker = boot.VERSION_OFFSET + 20
+        new_image[marker:marker + 8] = boot.NEW_LAYOUT_STAMP
+        new_package = boot.build_package(bytes(new_image))
+        for package, flags in ((old_package, 15), (new_package, 7)):
+            cap = boot.BootCapability('1.0.18', 0, 16384, flags)
+            with patch.object(boot, 'request') as request:
+                with self.assertRaisesRegex(ValueError, '布局不一致'):
+                    boot.stage_package(object(), package, cap)
+                request.assert_not_called()
+
     def setUp(self):
         self.package = boot.build_package(image())
         self.cap = boot.BootCapability('1.0.15', 123, 16384, 7)

@@ -16,6 +16,8 @@ from local_tcp_client import DeviceError, request, parse_device_info
 BASE = 0x08000000
 IMAGE_SIZE = 65536
 VERSION_OFFSET = 0xFA00
+NEW_LAYOUT_STAMP = b'F750LAY2'
+NEW_LAYOUT_FLAG = 8
 BOARD_ID = 0x07500008
 HEADER = struct.Struct('<8s7I20s68sI')
 PACKAGE_SIZE = 128 + IMAGE_SIZE
@@ -238,6 +240,10 @@ def stage_package(sock, package, capability, cancel=None, on_progress=None, on_i
     """严格窗口1；任何DATA/ACK错误立即结束，不重放写入或提交。"""
     package = validate_package(package.data if isinstance(package, BootPackage) else package)
     _check_cancel(cancel)
+    # 以实际镜像标识核对 BOOT 布局，避免用版本字符串推断分区。
+    new_boot = package.image[VERSION_OFFSET + 20:VERSION_OFFSET + 28] == NEW_LAYOUT_STAMP
+    if new_boot != bool(capability.flags & NEW_LAYOUT_FLAG):
+        raise ValueError('BOOT 镜像与开发板的 QSPI 布局不一致。首次切换请使用配套工厂 HEX。')
     body = request(sock, OP_BEGIN, payload=struct.pack('<I', PACKAGE_SIZE) + package.md5.encode('ascii'), on_info=on_info)
     if len(body) != 4:
         raise ValueError('BOOT BEGIN确认格式错误')
