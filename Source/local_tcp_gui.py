@@ -34,17 +34,18 @@ from local_tcp_client import (
     W78_LOGICAL_CHUNK_SIZES, SocketReader,
     W78_STATE_DONE, W78_STATE_FAILED, bind_lan_route, connect, frame, receive, request,
     upload_w78_window, validate_package, validate_w78_filename, validate_w78_hex, parse_device_info,
-    request_wait, upload_ota_stream,
+    request_wait, upload_ota_stream, W78StageTiming,
 )
 import boot_update_ui
 import d133_proxy_ui
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.57'
+APP_VERSION = '0.8.58'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
+W78_STATUS_INTERVAL = 0.10  # 顺序查询，快速任务更容易采到；不改变烧录传输窗口。
 WIRELESS_HEX_MODE = 'hex'
 WIRELESS_D133_MODE = 'd133'
 TRANSFER_CHUNK_SIZES = (1024, 2048, 4096, 8192, 16384)
@@ -2519,7 +2520,7 @@ class LocalTcpApp:
                     self._set_status(value)
                 elif kind == 'w78_progress':
                     sent, total, label = value
-                    fraction = sent / max(1, total)
+                    fraction = min(1.0, sent / total) if total else 0.0
                     self.w78_progress.set(fraction)
                     self.w78_progress_text_var.set(label)
                 elif kind in ('boot_status', 'boot_progress', 'boot_confirm', 'boot_finished'):
@@ -4517,15 +4518,35 @@ class LocalTcpApp:
         hex_path = self.w78_hex_path
         pic24 = self.w78_target_var.get().startswith('PIC24')
         target_name = 'PIC24FJ256DA210' if pic24 else 'W78E516DDG'
-        capacity = 262656 if pic24 else 65536
         self.connection_summary_var.set(f'{args.host}:{args.port}')
 
         def action(args, key, stop_event):
             from pic24_hex import validate_pic24_hex
-            package = validate_pic24_hex(hex_path) if pic24 else validate_w78_hex(hex_path)
+            if pic24:
+                package, capacity = validate_pic24_hex(hex_path), 262656
+            else:
+                package, extent = validate_w78_hex(hex_path, include_extent=True)
+                capacity = None
             filename = validate_w78_filename(hex_path)
             total = len(package)
+            version = '未知'
             with self._connection(args, key, stop_event) as sock:
+                # 从本次认证连接读取版本，避免使用界面上其他设备或上次连接的数据。
+                if not pic24:
+                    sock.settimeout(5)
+                    try:
+                        info = request(sock, 1, on_info=self._on_device_info, send_lock=self.w78_send_lock)
+                        version = str(parse_device_info(info).get('version') or '未知')
+                    except (DeviceError, ValueError):
+                        pass
+                    if version == '1.4.70':
+                        capacity = extent
+                    elif version == '1.4.69':
+                        capacity = 65536
+                    if capacity is None:
+                        self._post('log', f'F750 {version}：未确认 W78 写入范围，先显示设备返回的字节数。')
+                    else:
+                        self._post('log', f'F750 {version}：W78 写入范围 {capacity:,} 字节，擦除范围 64 KiB。')
                 # PIC24 擦写与读回时会有较长的状态间隔，交由可取消的短轮询处理。
                 sock.settimeout(120)
                 # 新版固件显式选择目标；旧版固件仅允许继续原 W78 流程。
@@ -4591,6 +4612,9 @@ class LocalTcpApp:
                     if command not in ignored_upload_acks:
                         ignored_upload_acks.add(command)
                         self._post('log', f'已跳过迟到的 HEX 上传确认响应（命令 {command}）。')
+                # 从发送烧录命令开始计时，不包含 HEX 上传。
+                started_at = time.monotonic()
+                w78_timing = None if pic24 else W78StageTiming(started_at)
                 try:
                     request_wait(sock, 8, 1 if pic24 else 0, on_info=self._on_device_info,
                                  send_lock=self.w78_send_lock, reader=operation_reader,
@@ -4610,6 +4634,7 @@ class LocalTcpApp:
                 except TimeoutError:
                     # 启动 ACK 丢失时先读状态确认，绝不重复发送有副作用的启动命令。
                     self._post('log', '启动确认暂未返回，正在读取开发板状态；不会重复启动或中断擦写。')
+                    sampled_at = time.monotonic()
                     state_body = request_wait(
                         sock, 9, on_info=self._on_device_info,
                         send_lock=self.w78_send_lock, reader=operation_reader,
@@ -4619,13 +4644,15 @@ class LocalTcpApp:
                     if len(state_body) != 72:
                         raise ValueError('开发板返回的烧录状态格式无效。')
                     observed_state, error = struct.unpack_from('<2I', state_body)
+                    if w78_timing is not None:
+                        w78_timing.observe(observed_state, sampled_at, time.monotonic())
                     if observed_state == W78_STATE_FAILED:
                         self._report_pic24_failure(sock, error) if pic24 else self._report_w78_failure(sock, error)
                     if observed_state not in tuple(range(4, 13)) + (W78_STATE_DONE,):
                         raise RuntimeError('开发板没有进入擦写状态；请重新启动烧录。')
                 state_names = {
                     4: '复位并选择 ISP', 5: '等待目标启动', 6: '连接 ISP',
-                    7: '同步数据包', 8: '擦除 APROM', 9: '写入 APROM',
+                    7: '同步数据包', 8: '擦除 APROM', 9: '发送 APROM 地址及校验值',
                     10: '写入 APROM', 11: '校验目标 APROM', 12: '启动目标程序',
                 }
                 if pic24:
@@ -4644,9 +4671,12 @@ class LocalTcpApp:
                     elif stage is not None:
                         timing['last'] = progress
                 deadline = time.monotonic() + (600 if pic24 else 300)
+                wait_seconds = 0.5 if pic24 else 0.0
                 while time.monotonic() < deadline:
-                    if stop_event.wait(0.5):
+                    if stop_event.wait(wait_seconds):
                         raise InterruptedError()
+                    wait_seconds = 0.5 if pic24 else W78_STATUS_INTERVAL
+                    sampled_at = time.monotonic()
                     body = request_wait(
                         sock, 9, on_info=self._on_device_info,
                         send_lock=self.w78_send_lock, reader=operation_reader,
@@ -4656,36 +4686,66 @@ class LocalTcpApp:
                     )
                     if len(body) != 72:
                         raise ValueError('开发板返回的烧录状态格式无效。')
+                    observed_at = time.monotonic()
                     state, error, _total, received, programmed, _source = struct.unpack_from('<6I', body)
+                    if w78_timing is not None:
+                        w78_timing.observe(state, sampled_at, observed_at)
+                        # 非预期固件行为时回退为纯字节显示，最终范围以板端为准。
+                        if capacity is not None and programmed > capacity:
+                            capacity = None
                     name = body[24:72].split(b'\0', 1)[0].decode('ascii', errors='replace')
                     if state != last_reported_state:
-                        phase = state_names.get(state, f'状态 {state}')
+                        phase = state_names.get(state, '校验通过（状态 13）' if
+                                                not pic24 and state == W78_STATE_DONE else f'状态 {state}')
                         self._post('log', f'{target_name} 阶段：{phase}。')
                         last_reported_state = state
                     if pic24:
                         mark_pic_stage('写入程序' if state in (9, 10) else '读回校验' if state == 11 else None, programmed)
+                    count_text = (f'{programmed:,} / {capacity:,} 字节' if capacity
+                                  else f'已写入 {programmed:,} 字节')
                     if state == W78_STATE_FAILED:
-                        self._post('w78_progress', (min(programmed, capacity), capacity,
-                            f'开发板报告的处理进度：{programmed:,} / {capacity:,} 字节；目标校验未通过'))
+                        self._post('w78_progress', (programmed, capacity,
+                            f'{count_text}；目标校验未通过'))
                         self._post('log', f'设备最终状态：{state}，错误码 {error}，'
-                            f'设备报告处理进度 {programmed:,} / {capacity:,} 字节；尚未确认烧录成功。')
+                            f'设备报告处理进度 {count_text}；尚未确认烧录成功。')
                         self._report_pic24_failure(sock, error) if pic24 else self._report_w78_failure(sock, error)
                     if state == W78_STATE_DONE:
-                        self._post('w78_progress', (capacity, capacity, f'{name or hex_path.name} | APROM 写入并校验完成'))
-                        self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
+                        if w78_timing is not None:
+                            detail = w78_timing.detail()
+                            actual = f'{programmed:,} 字节' if programmed else '实际写入量未上报'
+                            report = (f'F750 {version} | {hex_path.name} | W78 写入并校验完成：{actual}；'
+                                      f'工具箱轮询观测：{detail}；启动命令到完成 '
+                                      f'{observed_at - started_at:.3f} 秒（含擦除、复位及通信）。')
+                            self._post('w78_progress', (1, 1, f'完成：{actual}｜{detail}（轮询观测）'))
+                            self._post('log', report)
+                            self._save_w78_burn_log(report)
+                        else:
+                            self._post('w78_progress', (capacity, capacity, f'{name or hex_path.name} | APROM 写入并校验完成'))
+                            self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
                         self._post('status', target_name + ' 无线烧录完成')
                         return
                     if state in state_names:
-                        percent = min(100, programmed * 100 // capacity)
-                        self._post('w78_progress', (programmed, capacity,
-                            f'{state_names[state]}：{programmed:,} / {capacity:,} 字节（{percent}%）'))
-                        self._post('status', f'{target_name} | {state_names[state]} | {percent}%')
+                        percent = f'（{min(100, programmed * 100 // capacity)}%）' if capacity else ''
+                        self._post('w78_progress', (programmed, capacity, f'{state_names[state]}：{count_text}{percent}'))
+                        self._post('status', f'{target_name} | {state_names[state]} {percent}')
                     elif state == 3:
                         self._post('status', f'HEX 已校验 | {received:,} 字节')
                 raise TimeoutError('等待目标烧录完成超时；请查看开发板状态。')
 
         self._start_task('无线烧录', action,
                          require_connection=False, host_override=host_override)
+
+    def _save_w78_burn_log(self, report):
+        # 在用户目录追加每次成功记录，重开工具箱仍能对比；日志写入失败不影响烧录结果。
+        folder = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'ResearchToolbox' / 'Logs'
+        path = folder / 'W78_burn.log'
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            with path.open('a', encoding='utf-8') as handle:
+                handle.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {report}\n')
+            self._post('log', f'W78 对比记录已保存：{path}')
+        except OSError as exc:
+            self._post('log', f'无法保存 W78 对比记录：{exc}')
 
     @contextmanager
     def _ota_batch_session(self, args, key, stop_event, host, total, digest, on_info):

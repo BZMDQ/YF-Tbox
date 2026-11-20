@@ -4,6 +4,7 @@ import errno
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -388,7 +389,7 @@ def validate_w78_filename(path):
     return encoded
 
 
-def validate_w78_hex(path):
+def validate_w78_hex(path, *, include_extent=False):
     """Read and validate a W78E516 Intel HEX image before wireless upload."""
     path = Path(path)
     validate_w78_filename(path)
@@ -406,7 +407,7 @@ def validate_w78_hex(path):
         raise ValueError('W78 烧录只接受 .hex 文件。')
 
     base = 0
-    data_bytes = 0
+    aprom_extent = 0
     eof = False
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.rstrip('\r')
@@ -430,7 +431,9 @@ def validate_w78_hex(path):
             absolute = base + address
             if absolute > 65536 or count > 65536 - absolute:
                 raise ValueError(f'Intel HEX 第 {line_number} 行超出 W78 64 KiB APROM。')
-            data_bytes += count
+            # 固件从地址 0 连续写到最高有数据地址；空记录不扩大范围。
+            if count:
+                aprom_extent = max(aprom_extent, absolute + count)
         elif kind == 1:
             if count or address:
                 raise ValueError(f'Intel HEX 第 {line_number} 行 EOF 记录无效。')
@@ -448,9 +451,49 @@ def validate_w78_hex(path):
                 raise ValueError(f'Intel HEX 第 {line_number} 行起始地址记录无效。')
         else:
             raise ValueError(f'Intel HEX 第 {line_number} 行使用了不支持的记录类型。')
-    if not eof or not data_bytes:
+    if not eof or not aprom_extent:
         raise ValueError('W78 HEX 必须包含数据记录和 EOF 记录。')
-    return package
+    return (package, aprom_extent) if include_extent else package
+
+
+class W78StageTiming:
+    """记录轮询可确定的时间范围；设备事件必然落在请求与收到响应之间。"""
+
+    def __init__(self, start):
+        self.start = start
+        # 各范围依次是写入、校验、写入和校验合计；合计用于两段都短于轮询的情况。
+        self.windows = [[start, None, None, None] for _ in range(3)]
+
+    def observe(self, state, sent, received):
+        if state not in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
+            return
+        stage = 0 if state < 10 else 1 if state == 10 else 2 if state == 11 else 3
+        for window, (begin, end) in zip(self.windows, ((1, 1), (2, 2), (1, 2))):
+            if window[3] is not None:
+                continue
+            if stage < begin:
+                window[0] = sent
+            elif stage <= end:
+                if window[1] is None:
+                    window[1] = received
+                window[2] = sent
+            else:
+                window[3] = received
+
+    @staticmethod
+    def describe(window):
+        before, first_end, last_start, after = window
+        if after is None:
+            return '未观测到结束'
+        maximum = math.ceil(max(0, after - before) * 1000)
+        if first_end is None:
+            return f'未采到（≤ {maximum:,} ms）'
+        minimum = math.floor(max(0, last_start - first_end) * 1000)
+        return f'{minimum:,}–{maximum:,} ms' if minimum else f'≤ {maximum:,} ms'
+
+    def detail(self):
+        return '；'.join(f'{label} {self.describe(window)}' for label, window in
+                        zip(('写入', '校验', '写入＋校验'), self.windows))
 
 
 def bind_lan_route(sock, host, cancel=None):
