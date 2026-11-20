@@ -80,8 +80,8 @@ def install(gui):
         app.fixture_host_var = tk.StringVar(master=app.root, value=app.host_var.get())
         app.fixture_generation = None
         app.fixture_state_host = None
-        app.fixture_status_var = tk.StringVar(master=app.root, value='硬件未接入 | 当前仅配置和同步界面参数')
-        app.fixture_source_var = tk.StringVar(master=app.root, value='参数尚未读取；量程和步进可自定义')
+        app.fixture_status_var = tk.StringVar(master=app.root, value='硬件未接入')
+        app.fixture_source_var = tk.StringVar(master=app.root, value='参数未读取')
         ctk.CTkLabel(card, textvariable=app.fixture_status_var, fg_color=gui.COLORS['info_bg'],
                      text_color=gui.COLORS['blue'], corner_radius=8, anchor='w', height=34).grid(
                          row=0, column=0, sticky='ew', padx=16, pady=(12, 8))
@@ -94,7 +94,7 @@ def install(gui):
             if ip:
                 app.fixture_host_var.set(ip)
                 app.fixture_generation = None
-                app.fixture_status_var.set('已选择设备，请读取参数 | 硬件未接入')
+                app.fixture_status_var.set('参数未读取')
 
         app.fixture_device_combo = app._register_action(ctk.CTkComboBox(
             connect, values=['请先在总览添加设备'], command=select, state='readonly', height=34))
@@ -103,7 +103,9 @@ def install(gui):
         entry = app._register_action(ctk.CTkEntry(connect, textvariable=app.fixture_host_var, width=160, height=34))
         entry._toolbox_user_data = True
         entry.grid(row=0, column=1, padx=(0, 8))
-        app._secondary_button(connect, '读取参数/测量', app._fixture_read, width=136).grid(row=0, column=2)
+        rail = app._rail_card('fixture', '测试操作')
+        app._rail_button(rail, '读取参数', app._fixture_read, primary=True)
+        app._rail_button(rail, '发送参数', app._fixture_send)
         tabs = ctk.CTkTabview(card, height=352, fg_color=gui.COLORS['soft'])
         tabs.grid(row=2, column=0, sticky='ew', padx=16, pady=(0, 8))
         settings = tabs.add('参数设定')
@@ -119,14 +121,12 @@ def install(gui):
                 ('value', '0'), ('minimum', '0'), ('maximum', ''), ('step', '1' if name == 'ILED' else '0.1'))}
             fields['range_enabled'] = tk.BooleanVar(master=app.root, value=False)
             for column, key in enumerate(['value', 'minimum', 'maximum', 'step'], 1):
-                entry = app._register_action(ctk.CTkEntry(settings, textvariable=fields[key], width=100, height=30))
+                entry = app._register_action(ctk.CTkEntry(settings, textvariable=fields[key], width=56, height=30))
                 entry._toolbox_user_data = True
                 entry.grid(row=index + 1, column=column, sticky='ew', padx=4, pady=3)
             app._register_action(ctk.CTkCheckBox(settings, text='', variable=fields['range_enabled'], width=38)).grid(
                 row=index + 1, column=5, padx=10)
             app.fixture_fields.append(fields)
-        ctk.CTkLabel(settings, text='开启量程后按最小/最大值限制；当前使用非负设定值。', text_color=gui.COLORS['muted']).grid(
-            row=8, column=0, columnspan=6, sticky='w', padx=5, pady=(8, 0))
         measurements.grid_columnconfigure((0, 1), weight=1)
         app.fixture_measure_vars = []
         for index, (name, unit) in enumerate(MEASUREMENTS):
@@ -139,11 +139,6 @@ def install(gui):
             ctk.CTkLabel(row, textvariable=value, anchor='e', text_color=gui.COLORS['blue']).grid(row=0, column=1, sticky='ew', padx=10)
         ctk.CTkLabel(card, textvariable=app.fixture_source_var, anchor='w', text_color=gui.COLORS['muted']).grid(
             row=3, column=0, sticky='ew', padx=16, pady=(0, 4))
-        actions = ctk.CTkFrame(card, fg_color='transparent')
-        actions.grid(row=4, column=0, sticky='ew', padx=16, pady=(0, 12))
-        ctk.CTkLabel(actions, text='参数暂存于开发板；重启后复位。输出与测量接口尚未接入。',
-                     text_color=gui.COLORS['muted']).pack(side='left')
-        app._primary_button(actions, '发送界面参数', app._fixture_send, width=150).pack(side='right')
         refresh_devices(app)
 
     def accept(app, value):

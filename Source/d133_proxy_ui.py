@@ -8,18 +8,15 @@ import d133_proxy_client as proxy
 def initialize(app, gui):
     app.d133_proxy_running = app.d133_proxy_committed = False
     app.d133_proxy_path = app.d133_proxy_signature = None
-    app.d133_proxy_file_var = gui.tk.StringVar(master=app.root, value='未选择D133 ota.cpio及同名.sig')
-    app.d133_proxy_detail_var = gui.tk.StringVar(master=app.root, value='电脑TCP → 当前F750 → USB → 同一D133的非活动系统槽')
-    app.d133_proxy_status_var = gui.tk.StringVar(master=app.root, value='先安装F750 1.4.49和D133 1.0.169或更新固件，再连接USB。D133 1.0.170起支持免屏幕确认。')
+    app.d133_proxy_file_var = gui.tk.StringVar(master=app.root, value='未选择文件')
+    app.d133_proxy_detail_var = gui.tk.StringVar(master=app.root, value='OTA CPIO · RSA 签名')
+    app.d133_proxy_status_var = gui.tk.StringVar(master=app.root, value='等待开始')
 
 
 def build_card(app, gui, page, row):
     card = app._page_card(page, row)
     gui.ctk.CTkLabel(card, text='D133 · 经F750 USB更新A/B系统槽', font=app._font(18, 'bold'),
-                     anchor='w', wraplength=680).pack(fill='x', padx=18, pady=(16, 8))
-    gui.ctk.CTkLabel(card, text='使用当前F750的IP、TCP端口及配套Key认证。CPIO由F750经USB转交D133。D133 1.0.170起在电脑端确认即可，旧固件仍需在D133屏幕确认。',
-                     anchor='w', justify='left', wraplength=680,
-                     text_color=gui.COLORS['muted']).pack(fill='x', padx=18, pady=(0, 12))
+                     anchor='w', wraplength=410).pack(fill='x', padx=18, pady=(16, 8))
     target = gui.ctk.CTkFrame(card, fg_color='transparent')
     target.pack(fill='x', padx=18, pady=(0, 12))
     target.grid_columnconfigure(1, weight=1)
@@ -28,20 +25,17 @@ def build_card(app, gui, page, row):
     gui.ctk.CTkLabel(target, text='TCP端口').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(8, 0))
     app._new_entry(target, app.port_var, width=90).grid(row=1, column=1, sticky='w', pady=(8, 0))
     gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_file_var, anchor='w', justify='left',
-                     wraplength=680, font=app._font(12, 'bold')).pack(fill='x', padx=18, pady=(0, 6))
+                     wraplength=410, font=app._font(12, 'bold')).pack(fill='x', padx=18, pady=(0, 6))
     gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_detail_var, anchor='w', justify='left',
-                     wraplength=680, text_color=gui.COLORS['cyan']).pack(fill='x', padx=18, pady=(0, 12))
-    # 两行按钮适应最小窗口，避免中文按钮及签名说明发生遮挡。
-    app._secondary_button(card, '选择D133 CPIO及同名.sig…', lambda: choose_package(app), width=270).pack(anchor='w', padx=18, pady=(0, 10))
-    app._primary_button(card, '经F750 USB更新D133…', lambda: start_update(app), width=270).pack(anchor='w', padx=18, pady=(0, 14))
-    gui.ctk.CTkLabel(card, text='块大小与窗口由设备自动协商。三端支持且 F750 使用被动接收时，每块 128 KiB、窗口 2。旧设备仍可协商 64、32 或 4 KiB，进度区显示实际模式。D133校验签名并更新非活动槽。\n提交后停止按钮只停止电脑等待。请保持F750与D133供电及USB连接。',
-                     wraplength=680, anchor='w', justify='left',
-                     text_color=gui.COLORS['warning_text']).pack(fill='x', padx=18, pady=(0, 14))
-    app.d133_proxy_progress = gui.ctk.CTkProgressBar(card)
+                     wraplength=410, text_color=gui.COLORS['cyan']).pack(fill='x', padx=18, pady=(0, 12))
+    app.wireless_d133_actions = app._rail_card('w78', '更新操作')
+    app._rail_button(app.wireless_d133_actions, '选择文件', lambda: choose_package(app))
+    app._rail_button(app.wireless_d133_actions, '开始更新', lambda: start_update(app), primary=True)
+    app.d133_proxy_progress = gui.ctk.CTkProgressBar(card, height=8, progress_color=gui.COLORS['teal'])
     app.d133_proxy_progress.pack(fill='x', padx=18, pady=(0, 10))
     app.d133_proxy_progress.set(0)
     gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_status_var, anchor='w', justify='left',
-                     wraplength=680).pack(fill='x', padx=18, pady=(0, 18))
+                     wraplength=410).pack(fill='x', padx=18, pady=(0, 18))
     return card
 
 
@@ -54,9 +48,9 @@ def choose_package(app):
         package = proxy.load_package(path)
         app.d133_proxy_path = Path(path).resolve()
         app.d133_proxy_signature = Path(str(app.d133_proxy_path) + '.sig')
-        app.d133_proxy_file_var.set(f'{app.d133_proxy_path}\n签名：{app.d133_proxy_signature.name}')
+        app.d133_proxy_file_var.set(app.d133_proxy_path.name)
         app.d133_proxy_detail_var.set(f'D133 {package.version} | {len(package.data):,} 字节 | CPIO预检通过；RSA由D133验证')
-        app.d133_proxy_status_var.set('已选择CPIO及同名签名；尚未发送到设备。')
+        app.d133_proxy_status_var.set('已就绪')
     except (OSError, ValueError) as exc:
         app.d133_proxy_path = app.d133_proxy_signature = None
         app.d133_proxy_file_var.set('未选择有效CPIO及同名签名')

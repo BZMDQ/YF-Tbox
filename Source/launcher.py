@@ -66,7 +66,7 @@ def main() -> None:
                 # 设备页按需创建，隔离检查时主动切换后再调用控件。
                 app._show_page('devices')
                 root.update_idletasks()
-                page = app.pages['devices']
+                page = app.page_rails['devices']
                 entries = [w for w in widgets(page) if isinstance(w, gui.ctk.CTkEntry)]
                 button = next(w for w in widgets(page) if isinstance(w, gui.ctk.CTkButton)
                               and w.cget('text') == '添加到列表')
