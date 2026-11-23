@@ -16,6 +16,7 @@ from local_tcp_client import HEADER, connect, exact, frame
 INFO, DATA, COMMIT, HEALTH, BEGIN, CANCEL = 0xD100, 0xD102, 0xD103, 0xD105, 0xD106, 0xD107
 LOGICAL_DATA = 0xD109
 HARDWARE_CONFIG = 0xD10A
+SCREEN_CODE_PATTERN = r'[A-Z0-9][A-Z0-9._#-]{0,23}'
 LEGACY_CHUNK_SIZE = 4096
 LARGE_CHUNK_SIZE = 32768
 EXTENDED_CHUNK_SIZE = 65536
@@ -291,33 +292,38 @@ class HardwarePackage:
 
 
 def load_usb_file(path, signature_path=None):
-    """识别系统 CPIO 和独立屏幕配置包，继续由 D133 检查 RSA 签名。"""
+    """识别系统 OTA、旧签名配置包和可移植配置包。"""
     path = Path(path)
     if path.suffix.lower() != '.d133cfg':
         return load_package(path, signature_path)
     with path.open('rb') as stream:
-        signed = stream.read(385)
-    if not 256 < len(signed) <= 384:
+        data = stream.read(385)
+    portable = data.startswith(b'D133-HWCFG/3\n')
+    trailer = 32 if portable else 256
+    if not trailer < len(data) <= 128 + trailer:
         raise ValueError('独立配置包长度无效。')
-    fields = signed[:-256].decode('ascii').split('\n')
-    formats = {'D133-HWCFG/1': 1, 'D133-HWCFG/2': 2}
+    payload = data[:-trailer]
+    if portable and hashlib.sha256(payload).digest() != data[-trailer:]:
+        raise ValueError('配置包完整性校验失败。')
+    fields = payload.decode('ascii').split('\n')
+    formats = {'D133-HWCFG/1': 1, 'D133-HWCFG/2': 2, 'D133-HWCFG/3': 3}
     format_id = formats.get(fields[0])
     if (format_id is None or fields[1:3] != [PRODUCT, HARDWARE] or fields[-1] or
-            len(fields) != (10 if format_id == 2 else 8)):
+            len(fields) != (8 if format_id == 1 else 10)):
         raise ValueError('请选择与 D133 板型匹配的独立配置包。')
-    if format_id == 2:
+    if format_id != 1:
         code, slot, panel, ic, touch, raw_size = fields[3:9]
-        if not ic or code in ('CS000', 'CS001'):
+        if not ic or (format_id == 2 and code in ('CS000', 'CS001')):
             raise ValueError('自定义屏幕代号或显示 IC 无效。')
     else:
         slot, panel, touch, raw_size = fields[3:7]
         code = slot
     size = re.fullmatch(r'([0-9]{1,5}),([0-9]{1,5})', raw_size)
-    if (slot not in ('CS000', 'CS001') or not re.fullmatch(r'CS[0-9]{3}', code)
+    if (slot not in ('CS000', 'CS001') or not re.fullmatch(SCREEN_CODE_PATTERN, code)
             or not panel or not touch or size is None or
             not all(0 < int(axis) <= 65535 for axis in size.groups())):
         raise ValueError('独立配置包中的代号、分辨率或器件无效。')
-    return HardwarePackage(signed, format_id, code, slot, panel, touch, ' × '.join(size.groups()))
+    return HardwarePackage(data, format_id, code, slot, panel, touch, ' × '.join(size.groups()))
 
 
 class HardwareConfigRejected(ValueError):
@@ -338,10 +344,16 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
         before = device_info(sock)
         if before.get('relay_hwcfg') != 1:
             raise ValueError('F750 需要 1.5.5 或支持独立配置包的固件。')
+        if package.format == 3 and before.get('relay_hwcfg_portable') != 1:
+            raise ValueError('请先安装 F750 1.5.7，再登记此配置包。')
         capability = before.get('usb_hwcfg')
-        # 旧版本会立即切屏，能力不匹配时不得发出任何写入命令。
-        if type(capability) is not int or capability < 3:
-            raise ValueError('请先安装 D133 1.0.178 或支持只登记的固件。')
+        # 旧状态 3 只支持传统代号，并且 MIPI 面板名会截断。
+        legacy_lvds = (package.format != 3 and package.slot == 'CS000' and
+                       re.fullmatch(r'CS[0-9]{3}', package.code))
+        required = 3 if legacy_lvds else 4
+        if type(capability) is not int or capability < required:
+            version = '1.0.178' if legacy_lvds else '1.0.179'
+            raise ValueError(f'请先安装 D133 {version}，再登记此配对。')
         if not before['confirmed'] or before['slot'] != before['next_slot']:
             raise ValueError('D133 当前系统槽尚未健康确认，请稍后重试。')
         _check_cancel(cancel)
@@ -361,6 +373,7 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
                     12: 'D133 不支持该面板时序与 IC 配对。',
                     15: 'D133 自定义屏幕登记表已满。',
                     16: '该屏幕代号已绑定其他时序，请使用新代号。',
+                    17: 'D133 拒绝配置包完整性校验。',
                 }.get(exc.status, str(exc))) from exc
         except (OSError, ValueError):
             # 应答超时可能发生在登记完成之后，继续通过只读回连核对。
@@ -389,11 +402,12 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
             raise ValueError('登记期间当前系统或屏幕状态发生变化，请在 D133 核对。')
         profiles = after.get('screen_profiles')
         if not isinstance(profiles, str) or not re.fullmatch(
-                r'(?:CS[0-9]{3}=CS[0-9]{3};){0,14}', profiles):
+                rf'(?:{SCREEN_CODE_PATTERN}=CS[0-9]{{3}};){{0,14}}', profiles):
             raise ValueError('D133 返回的屏幕登记表无效。')
         bindings = dict(item.split('=') for item in profiles.split(';') if item)
-        registered = (bindings.get(package.code) == package.slot if package.format == 2
-                      else package.slot in bindings.values())
+        native_code = package.format == 1 or package.code == package.slot
+        registered = (package.slot in bindings.values() if native_code
+                      else bindings.get(package.code) == package.slot)
         if registered and after['confirmed']:
             return f'{package.code} 已登记，当前屏幕 {after["screen"]} 保持原样。'
         if cancel is None:

@@ -120,21 +120,45 @@ class ProxyTests(unittest.TestCase):
                 self.assertIn(expected, progress.call_args.args[1])
                 self.assertEqual([call.args[1] for call in request.call_args_list], [proxy.INFO, proxy.BEGIN])
 
+    def test_portable_configuration_checks_digest_and_accepts_long_model(self):
+        import hashlib
+        payload = (b'D133-HWCFG/3\nD133CBS\nD133CBV-QFN88-V1-2\nWJ101E5TAAUMNG10#\nCS001\n'
+                   b'ILI9881C-04T00GA MIPI-4L\nILI9881C\nGT9271\n800,1280\n')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'screen.d133cfg'
+            data = payload + hashlib.sha256(payload).digest()
+            path.write_bytes(data)
+            package = proxy.load_usb_file(path)
+            self.assertEqual((package.format, package.code, package.slot), (3, 'WJ101E5TAAUMNG10#', 'CS001'))
+            path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+            with self.assertRaisesRegex(ValueError, '完整性'):
+                proxy.load_usb_file(path)
+
+    def test_portable_configuration_blocks_old_relay_before_writing(self):
+        package = proxy.HardwarePackage(b'data', 3, 'WJ101E5TAAUMNG10#', 'CS001', 'MIPI', 'GT9271', '800 × 1280')
+        previous = dict(info(), relay_hwcfg=1, usb_hwcfg=4)
+        with patch.object(proxy, 'connect', return_value=Mock()), \
+                patch.object(proxy, 'device_info', return_value=previous), \
+                patch.object(proxy, 'request') as request:
+            with self.assertRaisesRegex(ValueError, '1.5.7'):
+                proxy.install_hardware(SimpleNamespace(), b'k' * 32, package, Mock())
+        request.assert_not_called()
+
     def test_independent_profile_rejects_old_switching_receiver(self):
         package = proxy.HardwarePackage(b'signed', 2, 'CS002', 'CS001', 'MIPI', 'GT9271', '800 × 1280')
         previous = dict(info(), relay_hwcfg=1, usb_hwcfg=2)
         with patch.object(proxy, 'connect', return_value=Mock()), \
                 patch.object(proxy, 'device_info', return_value=previous), \
                 patch.object(proxy, 'request') as request:
-            with self.assertRaisesRegex(ValueError, '1.0.178'):
+            with self.assertRaisesRegex(ValueError, '1.0.179'):
                 proxy.install_hardware(SimpleNamespace(), b'k' * 32, package, Mock())
         request.assert_not_called()
 
     def test_independent_profile_verifies_registration_without_switching(self):
         package = proxy.HardwarePackage(b'signed', 2, 'CS002', 'CS001', 'MIPI', 'GT9271', '800 × 1280')
-        previous = dict(info(), relay_hwcfg=1, usb_hwcfg=3, screen='CS000',
+        previous = dict(info(), relay_hwcfg=1, usb_hwcfg=4, screen='CS000',
                         screen_slot='CS000', screen_width=1024, screen_height=600,
-                        touch='GT911', screen_profiles='CS000=CS000;CS001=CS001;')
+                        touch='GT911', screen_profiles='CS000=CS000;WJ101E5TAAUMNG10#=CS001;')
         after = dict(previous, screen_profiles=previous['screen_profiles'] + 'CS002=CS001;')
         with patch.object(proxy, 'connect', return_value=Mock()), \
                 patch.object(proxy, 'device_info', side_effect=[previous, after]), \
