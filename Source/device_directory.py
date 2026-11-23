@@ -449,7 +449,9 @@ def install(gui):
             app.device_combo.set(next((label for ip, label in choices if ip == current), current))
         for kind, combo in app.named_device_selectors.items():
             combo.configure(values=[label for _, label in choices] or ['尚未添加设备'])
-            selected = app.w78_host_var.get().strip() if kind == 'w78' else getattr(app, 'ota_selected_ip', app.host_var.get().strip())
+            target_vars = {'w78': 'w78_host_var', 'd133_usb': 'd133_proxy_host_var'}
+            saved = getattr(app, target_vars.get(kind, ''), None)
+            selected = saved.get().strip() if saved is not None else getattr(app, 'ota_selected_ip', app.host_var.get().strip())
             combo.set(next((label for ip, label in choices if ip == selected), selected))
         if hasattr(app, 'ota_hosts_input'):
             refresh_ota_names(app)
@@ -468,7 +470,7 @@ def install(gui):
         row = ctk.CTkFrame(parent, fg_color='transparent')
         row.pack(fill='x', padx=18, pady=(0, 10))
         row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(row, text='选择设备' if kind == 'w78' else '选择设备加入升级列表').grid(row=0, column=0, padx=(0, 10))
+        ctk.CTkLabel(row, text='选择设备加入升级列表' if kind == 'ota' else '选择设备').grid(row=0, column=0, padx=(0, 10))
         def choose(value):
             if app.is_running:
                 return
@@ -477,6 +479,8 @@ def install(gui):
                 return
             if kind == 'w78':
                 app.w78_host_var.set(ip)
+            elif kind == 'd133_usb':
+                app.d133_proxy_host_var.set(ip)
             else:
                 app.ota_selected_ip = ip
                 app._add_ota_target(ip)

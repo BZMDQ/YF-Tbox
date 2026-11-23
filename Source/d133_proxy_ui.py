@@ -3,25 +3,27 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import d133_proxy_client as proxy
+from device_directory import normalize_ipv4
 
 
 def initialize(app, gui):
     app.d133_proxy_running = app.d133_proxy_committed = False
     app.d133_proxy_path = app.d133_proxy_signature = None
     app.d133_proxy_file_var = gui.tk.StringVar(master=app.root, value='未选择文件')
-    app.d133_proxy_detail_var = gui.tk.StringVar(master=app.root, value='OTA CPIO · RSA 签名')
+    app.d133_proxy_detail_var = gui.tk.StringVar(master=app.root, value='系统 OTA / 屏幕配置包')
     app.d133_proxy_status_var = gui.tk.StringVar(master=app.root, value='等待开始')
 
 
 def build_card(app, gui, page, row):
     card = app._page_card(page, row)
-    gui.ctk.CTkLabel(card, text='D133 · 经F750 USB更新A/B系统槽', font=app._font(18, 'bold'),
+    gui.ctk.CTkLabel(card, text='D133 USB 更新', font=app._font(18, 'bold'),
                      anchor='w', wraplength=410).pack(fill='x', padx=18, pady=(16, 8))
+    app._build_named_selector(card, 'd133_usb')
     target = gui.ctk.CTkFrame(card, fg_color='transparent')
     target.pack(fill='x', padx=18, pady=(0, 12))
     target.grid_columnconfigure(1, weight=1)
-    gui.ctk.CTkLabel(target, text='当前F750 IP').grid(row=0, column=0, sticky='w', padx=(0, 10))
-    app._new_entry(target, app.host_var, width=210).grid(row=0, column=1, sticky='ew')
+    gui.ctk.CTkLabel(target, text='F750 IP').grid(row=0, column=0, sticky='w', padx=(0, 10))
+    app._new_entry(target, app.d133_proxy_host_var, width=210).grid(row=0, column=1, sticky='ew')
     gui.ctk.CTkLabel(target, text='TCP端口').grid(row=1, column=0, sticky='w', padx=(0, 10), pady=(8, 0))
     app._new_entry(target, app.port_var, width=90).grid(row=1, column=1, sticky='w', pady=(8, 0))
     gui.ctk.CTkLabel(card, textvariable=app.d133_proxy_file_var, anchor='w', justify='left',
@@ -40,20 +42,27 @@ def build_card(app, gui, page, row):
 
 
 def choose_package(app):
-    path = filedialog.askopenfilename(parent=app.root, title='选择D133 CPIO（同目录应有同名.cpio.sig）',
-                                     filetypes=[('D133 ArtInChip CPIO', '*.cpio')])
+    path = filedialog.askopenfilename(parent=app.root, title='选择 D133 更新文件',
+                                     filetypes=[('D133 更新文件', ('*.cpio', '*.d133cfg')),
+                                                ('D133 系统 OTA', '*.cpio'),
+                                                ('屏幕配置包', '*.d133cfg')])
     if not path:
         return
     try:
-        package = proxy.load_package(path)
+        package = proxy.load_usb_file(path)
         app.d133_proxy_path = Path(path).resolve()
-        app.d133_proxy_signature = Path(str(app.d133_proxy_path) + '.sig')
         app.d133_proxy_file_var.set(app.d133_proxy_path.name)
-        app.d133_proxy_detail_var.set(f'D133 {package.version} | {len(package.data):,} 字节 | CPIO预检通过；RSA由D133验证')
+        if isinstance(package, proxy.HardwarePackage):
+            app.d133_proxy_signature = None
+            app.d133_proxy_detail_var.set(
+                f'{package.code} | {package.resolution} | {package.panel} | {package.touch}')
+        else:
+            app.d133_proxy_signature = Path(str(app.d133_proxy_path) + '.sig')
+            app.d133_proxy_detail_var.set(f'D133 {package.version} | {len(package.data):,} 字节 | CPIO 预检通过')
         app.d133_proxy_status_var.set('已就绪')
     except (OSError, ValueError) as exc:
         app.d133_proxy_path = app.d133_proxy_signature = None
-        app.d133_proxy_file_var.set('未选择有效CPIO及同名签名')
+        app.d133_proxy_file_var.set('未选择有效文件')
         messagebox.showerror('D133升级包无效', str(exc), parent=app.root)
 
 
@@ -84,20 +93,24 @@ def start_update(app):
     if app.is_running:
         return
     try:
-        args, key = app._connection_inputs()
+        args, key = app._connection_inputs(host_override=normalize_ipv4(app.d133_proxy_host_var.get().strip()))
         if len(key) != 32:
             raise ValueError('请在设置中导入当前F750的配套32字节Local TCP Key')
         if app.d133_proxy_path is None:
-            raise ValueError('请先选择D133 ota.cpio及同名.sig')
-        package = proxy.load_package(app.d133_proxy_path, app.d133_proxy_signature)
+            raise ValueError('请选择 D133 OTA 或独立配置包。')
+        package = proxy.load_usb_file(app.d133_proxy_path, app.d133_proxy_signature)
     except (OSError, ValueError) as exc:
         messagebox.showerror('无法经F750更新D133', str(exc), parent=app.root)
         return
-    text = (f'F750转发设备：{args.host}:{args.port}\nD133目标版本：{package.version}\n'
-            f'包：{app.d133_proxy_path.name}\n签名：{app.d133_proxy_signature.name}\n\n'
-            'D133 1.0.170起使用电脑端确认。旧固件请按进度提示在D133屏幕确认。\n'
-            'D133校验签名并更新非活动系统槽；请保持USB连接及稳定供电。开始？')
-    if not messagebox.askyesno('确认D133经F750 USB A/B更新', text, parent=app.root):
+    hardware = isinstance(package, proxy.HardwarePackage)
+    target = f'F750 {args.host}:{args.port}\n'
+    if hardware:
+        text = target + (f'{package.code} · {package.resolution}\n{package.panel} · {package.touch}\n\n'
+                         '安装屏幕配置后 D133 将重启。')
+    else:
+        text = target + (f'D133 目标版本 {package.version}\n{app.d133_proxy_path.name}\n'
+                         f'{app.d133_proxy_signature.name}\n\n更新非活动系统槽，请保持供电和 USB 连接。')
+    if not messagebox.askyesno('确认 D133 USB 更新', text, parent=app.root):
         return
     app.d133_proxy_running = True
     app.d133_proxy_committed = False
@@ -113,21 +126,28 @@ def start_update(app):
             app._post('d133_proxy_commit')
 
         try:
-            version = proxy.upload(args, key, path, progress, stop, committed, signature)
-            message = f'D133 {version}更新完成；新版本、预定非活动槽与健康确认均已核对。'
+            if hardware:
+                message = proxy.install_hardware(args, key, package, progress, stop, committed)
+            else:
+                version = proxy.upload(args, key, path, progress, stop, committed, signature)
+                message = f'D133 {version}更新完成；新版本、预定非活动槽与健康确认均已核对。'
             progress(100, message)
             app._post('log', message)
-            app._post('status', 'D133重启与健康核对完成')
+            app._post('status', message if hardware else 'D133重启与健康核对完成')
         except Exception as exc:
             # 此动作自己保留“已提交/未知”结论，避免通用任务框架把它改写为“已取消”。
             message = str(exc)
-            if app.d133_proxy_committed:
+            if isinstance(exc, proxy.HardwareConfigRejected):
+                app.d133_proxy_committed = False
+            if app.d133_proxy_committed and not hardware:
                 message += '\n提交请求已发出；不能撤销，未确认新系统健康。'
             progress(100 if app.d133_proxy_committed else 0, message)
             app._post('log', 'D133经F750 USB：' + message)
-            app._post('status', 'D133已提交，健康待核对' if app.d133_proxy_committed else 'D133更新未完成')
+            app._post('status', 'D133 配置状态待核对' if hardware and app.d133_proxy_committed else
+                      'D133已提交，健康待核对' if app.d133_proxy_committed else 'D133更新未完成')
         finally:
             app._post('d133_proxy_finished')
-    app._start_task('D133经F750 USB A/B更新', action, require_connection=False)
+    app._start_task('D133 屏幕配置' if hardware else 'D133经F750 USB A/B更新',
+                    action, require_connection=False)
     if not app.is_running:
         app.d133_proxy_running = False

@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.71'
+APP_VERSION = '0.8.72'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -770,6 +770,8 @@ class LocalTcpApp:
         self.port_var = tk.StringVar(value=str(settings.get('port', DEFAULT_PORT)))
         self.w78_host_var = tk.StringVar(
             value=str(settings.get('w78_host', settings.get('host', '')) or ''))
+        self.d133_proxy_host_var = tk.StringVar(
+            value=str(settings.get('d133_usb_host', settings.get('host', '')) or ''))
         self.ota_hosts_text = str(settings.get('ota_hosts', '') or '')
 
         self.hex_name_var = tk.StringVar(value='未选择 HEX 文件')
@@ -888,6 +890,7 @@ class LocalTcpApp:
                 'port': port,
                 'w78_host': self.w78_host_var.get().strip()
                 if hasattr(self, 'w78_host_var') else '',
+                'd133_usb_host': self.d133_proxy_host_var.get().strip(),
                 'language': self.ui_language,
                 'ota_chunk_size': self.ota_chunk_size,
                 'w78_chunk_size': self.w78_chunk_size,
@@ -1588,7 +1591,7 @@ class LocalTcpApp:
         # 保留各模式已选的文件和设置，切换时仅更换可见表单。
         if hasattr(self, 'wireless_hex_actions') and hasattr(self, 'wireless_d133_actions'):
             show_d133 = self.wireless_mode_var.get() == WIRELESS_D133_MODE
-            self.wireless_link_address.configure(textvariable=self.host_var if show_d133 else self.w78_host_var)
+            self.wireless_link_address.configure(textvariable=self.d133_proxy_host_var if show_d133 else self.w78_host_var)
             for active, card in ((not show_d133, self.wireless_hex_actions), (show_d133, self.wireless_d133_actions)):
                 if active:
                     card.grid()

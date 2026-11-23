@@ -124,6 +124,7 @@ class ProxyTests(unittest.TestCase):
         app = SimpleNamespace(
             is_running=False, root=object(),
             d133_proxy_path=Path('ota.cpio'), d133_proxy_signature=Path('ota.cpio.sig'),
+            d133_proxy_host_var=Mock(get=Mock(return_value='127.0.0.1')),
             _connection_inputs=Mock(return_value=(SimpleNamespace(host='127.0.0.1', port=5000), b'k' * 32)),
             _start_task=Mock(),
         )

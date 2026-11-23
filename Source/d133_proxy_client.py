@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import re
 import select
 import struct
 import time
@@ -14,6 +15,7 @@ from local_tcp_client import HEADER, connect, exact, frame
 
 INFO, DATA, COMMIT, HEALTH, BEGIN, CANCEL = 0xD100, 0xD102, 0xD103, 0xD105, 0xD106, 0xD107
 LOGICAL_DATA = 0xD109
+HARDWARE_CONFIG = 0xD10A
 LEGACY_CHUNK_SIZE = 4096
 LARGE_CHUNK_SIZE = 32768
 EXTENDED_CHUNK_SIZE = 65536
@@ -276,3 +278,119 @@ def upload(args, key, path, progress, cancel=None, on_commit=None, signature_pat
         target = transfer(sock, package, initial, progress, cancel, on_commit)
     progress(100, f'提交请求已发出；等待D133以{package.version}从槽{target}重启并健康确认')
     return monitor(connection, package, initial, target, progress, cancel)
+
+@dataclass(frozen=True)
+class HardwarePackage:
+    data: bytes
+    format: int
+    code: str
+    slot: str
+    panel: str
+    touch: str
+    resolution: str
+
+
+def load_usb_file(path, signature_path=None):
+    """识别系统 CPIO 和独立屏幕配置包，继续由 D133 检查 RSA 签名。"""
+    path = Path(path)
+    if path.suffix.lower() != '.d133cfg':
+        return load_package(path, signature_path)
+    with path.open('rb') as stream:
+        signed = stream.read(385)
+    if not 256 < len(signed) <= 384:
+        raise ValueError('独立配置包长度无效。')
+    fields = signed[:-256].decode('ascii').split('\n')
+    formats = {'D133-HWCFG/1': 1, 'D133-HWCFG/2': 2}
+    format_id = formats.get(fields[0])
+    if (format_id is None or fields[1:3] != [PRODUCT, HARDWARE] or fields[-1] or
+            len(fields) != (10 if format_id == 2 else 8)):
+        raise ValueError('请选择与 D133 板型匹配的独立配置包。')
+    if format_id == 2:
+        code, slot, panel, ic, touch, raw_size = fields[3:9]
+        if not ic or code in ('CS000', 'CS001'):
+            raise ValueError('自定义屏幕代号或显示 IC 无效。')
+    else:
+        slot, panel, touch, raw_size = fields[3:7]
+        code = slot
+    size = re.fullmatch(r'([0-9]{1,5}),([0-9]{1,5})', raw_size)
+    if (slot not in ('CS000', 'CS001') or not re.fullmatch(r'CS[0-9]{3}', code)
+            or not panel or not touch or size is None or
+            not all(0 < int(axis) <= 65535 for axis in size.groups())):
+        raise ValueError('独立配置包中的代号、分辨率或器件无效。')
+    return HardwarePackage(signed, format_id, code, slot, panel, touch, ' × '.join(size.groups()))
+
+
+class HardwareConfigRejected(ValueError):
+    """设备明确拒绝请求，可以区分于提交应答丢失。"""
+
+
+def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
+    """独立配置只提交一次；断线后只查询生效状态，避免再次写入。"""
+    if len(key) != 32:
+        raise ValueError('请导入 F750 配套的 Local TCP Key。')
+
+    def connection():
+        sock = connect(args, key, cancel=cancel, on_info=lambda _body: None)
+        sock.settimeout(6)
+        return closing(sock)
+
+    with connection() as sock:
+        before = device_info(sock)
+        if before.get('relay_hwcfg') != 1:
+            raise ValueError('F750 需要 1.5.5 或支持独立配置包的固件。')
+        capability = before.get('usb_hwcfg')
+        if type(capability) is not int or capability < package.format:
+            version = '1.0.177' if package.format == 2 else '1.0.176'
+            raise ValueError(f'D133 需要 {version} 或更高版本才能安装此配置包。')
+        if not before['confirmed'] or before['slot'] != before['next_slot']:
+            raise ValueError('D133 当前系统槽尚未健康确认，请稍后重试。')
+        _check_cancel(cancel)
+        progress(20, '正在提交屏幕配置…')
+        sock.settimeout(35)
+        if on_commit:
+            on_commit()
+        ack = None
+        try:
+            ack = request(sock, HARDWARE_CONFIG, payload=package.data)
+        except ProxyError as exc:
+            if exc.status not in (101, 102):
+                raise HardwareConfigRejected({
+                    3: 'F750 或 D133 忙，未登记配置。',
+                    5: 'D133 保存屏幕配置失败。',
+                    9: 'D133 拒绝配置包签名。',
+                    12: 'D133 不支持该面板时序与 IC 配对。',
+                    15: 'D133 自定义屏幕登记表已满。',
+                }.get(exc.status, str(exc))) from exc
+        except (OSError, ValueError):
+            # 应答超时可能发生在登记完成之后，继续通过只读回连核对。
+            pass
+        if ack is not None and ack != package.code.encode('ascii'):
+            raise ValueError('D133 返回的屏幕代号与配置包不符。')
+
+    progress(70, '等待 D133 USB 重连并核对屏幕配置…')
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        if cancel is not None and cancel.wait(2):
+            raise InterruptedError('已停止等待，D133 配置状态尚需核对。')
+        if cancel is None:
+            time.sleep(2)
+        try:
+            with connection() as sock:
+                after = device_info(sock, HEALTH)
+        except (OSError, ProxyError):
+            continue
+        if (after['version'], after['slot']) != (before['version'], before['slot']):
+            raise ValueError('D133 系统版本或运行槽发生变化，请核对设备。')
+        width, height = map(int, package.resolution.split(' × '))
+        active = after.get('screen') == package.code
+        if package.format == 2:
+            active = active and (after.get('screen_slot'), after.get('screen_width'),
+                                 after.get('screen_height')) == (package.slot, width, height)
+        if active and after['confirmed']:
+            current_touch = after.get('touch', '未知')
+            return (f'{package.code} {package.resolution} 已生效｜触摸 {current_touch}'
+                    if current_touch != package.touch else
+                    f'{package.code} {package.resolution} 已生效｜{package.touch}')
+    if ack is not None:
+        return 'D133 已确认保存配置，尚未读回生效状态。'
+    raise TimeoutError('配置提交结果尚未确认，请查看 D133 当前屏幕。')
