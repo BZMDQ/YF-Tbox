@@ -89,6 +89,10 @@ def main() -> None:
                 assert app.active_page_key == 'w78' and app.wireless_mode_var.get() == gui.WIRELESS_D133_MODE
                 assert app.wireless_d133_card.winfo_manager() == 'grid'
                 assert not app.wireless_hex_card.winfo_manager()
+                usb_entries = [widget for widget in widgets(app.wireless_d133_card)
+                               if isinstance(widget, gui.ctk.CTkEntry)]
+                assert usb_entries == [app.d133_proxy_host_entry], "USB 页应只保留 IP 输入"
+                assert len(app.d133_proxy_stage_labels) == len(app.w78_stage_labels) == 3
                 app.wireless_hex_choice.invoke()
                 assert app.wireless_mode_var.get() == gui.WIRELESS_HEX_MODE
                 assert app.wireless_hex_card.winfo_manager() == 'grid'

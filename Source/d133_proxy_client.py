@@ -325,7 +325,7 @@ class HardwareConfigRejected(ValueError):
 
 
 def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
-    """独立配置只提交一次；断线后只查询生效状态，避免再次写入。"""
+    """独立配置只提交一次，验证登记表以及未变化的运行配置。"""
     if len(key) != 32:
         raise ValueError('请导入 F750 配套的 Local TCP Key。')
 
@@ -339,13 +339,13 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
         if before.get('relay_hwcfg') != 1:
             raise ValueError('F750 需要 1.5.5 或支持独立配置包的固件。')
         capability = before.get('usb_hwcfg')
-        if type(capability) is not int or capability < package.format:
-            version = '1.0.177' if package.format == 2 else '1.0.176'
-            raise ValueError(f'D133 需要 {version} 或更高版本才能安装此配置包。')
+        # 旧版本会立即切屏，能力不匹配时不得发出任何写入命令。
+        if type(capability) is not int or capability < 3:
+            raise ValueError('请先安装 D133 1.0.178 或支持只登记的固件。')
         if not before['confirmed'] or before['slot'] != before['next_slot']:
             raise ValueError('D133 当前系统槽尚未健康确认，请稍后重试。')
         _check_cancel(cancel)
-        progress(20, '正在提交屏幕配置…')
+        progress(20, '正在登记屏幕配置…')
         sock.settimeout(35)
         if on_commit:
             on_commit()
@@ -360,6 +360,7 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
                     9: 'D133 拒绝配置包签名。',
                     12: 'D133 不支持该面板时序与 IC 配对。',
                     15: 'D133 自定义屏幕登记表已满。',
+                    16: '该屏幕代号已绑定其他时序，请使用新代号。',
                 }.get(exc.status, str(exc))) from exc
         except (OSError, ValueError):
             # 应答超时可能发生在登记完成之后，继续通过只读回连核对。
@@ -367,30 +368,38 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
         if ack is not None and ack != package.code.encode('ascii'):
             raise ValueError('D133 返回的屏幕代号与配置包不符。')
 
-    progress(70, '等待 D133 USB 重连并核对屏幕配置…')
-    deadline = time.monotonic() + 45
+    progress(70, '正在读取登记表…')
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if cancel is not None and cancel.wait(2):
-            raise InterruptedError('已停止等待，D133 配置状态尚需核对。')
-        if cancel is None:
-            time.sleep(2)
+        if cancel is not None and cancel.is_set():
+            raise InterruptedError('已停止等待，D133 登记状态尚需核对。')
         try:
             with connection() as sock:
                 after = device_info(sock, HEALTH)
         except (OSError, ProxyError):
+            if cancel is None:
+                time.sleep(1)
+            else:
+                cancel.wait(1)
             continue
-        if (after['version'], after['slot']) != (before['version'], before['slot']):
-            raise ValueError('D133 系统版本或运行槽发生变化，请核对设备。')
-        width, height = map(int, package.resolution.split(' × '))
-        active = after.get('screen') == package.code
-        if package.format == 2:
-            active = active and (after.get('screen_slot'), after.get('screen_width'),
-                                 after.get('screen_height')) == (package.slot, width, height)
-        if active and after['confirmed']:
-            current_touch = after.get('touch', '未知')
-            return (f'{package.code} {package.resolution} 已生效｜触摸 {current_touch}'
-                    if current_touch != package.touch else
-                    f'{package.code} {package.resolution} 已生效｜{package.touch}')
+
+        identity = ('version', 'slot', 'next_slot', 'screen', 'screen_slot',
+                    'screen_width', 'screen_height', 'touch')
+        if any(after.get(field) != before.get(field) for field in identity):
+            raise ValueError('登记期间当前系统或屏幕状态发生变化，请在 D133 核对。')
+        profiles = after.get('screen_profiles')
+        if not isinstance(profiles, str) or not re.fullmatch(
+                r'(?:CS[0-9]{3}=CS[0-9]{3};){0,14}', profiles):
+            raise ValueError('D133 返回的屏幕登记表无效。')
+        bindings = dict(item.split('=') for item in profiles.split(';') if item)
+        registered = (bindings.get(package.code) == package.slot if package.format == 2
+                      else package.slot in bindings.values())
+        if registered and after['confirmed']:
+            return f'{package.code} 已登记，当前屏幕 {after["screen"]} 保持原样。'
+        if cancel is None:
+            time.sleep(1)
+        else:
+            cancel.wait(1)
     if ack is not None:
-        return 'D133 已确认保存配置，尚未读回生效状态。'
-    raise TimeoutError('配置提交结果尚未确认，请查看 D133 当前屏幕。')
+        return 'D133 已应答保存，尚未读回登记表。'
+    raise TimeoutError('登记结果尚未确认，请在 F750 的 USB 控制中读取屏幕列表。')

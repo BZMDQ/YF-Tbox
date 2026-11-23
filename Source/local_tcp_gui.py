@@ -42,7 +42,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.72'
+APP_VERSION = '0.8.73'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1604,13 +1604,69 @@ class LocalTcpApp:
             self.wireless_d133_card.grid_remove()
             self.wireless_hex_card.grid()
 
+    def _wireless_target_row(self, card):
+        row = ctk.CTkFrame(card, fg_color='transparent')
+        row.pack(fill='x', padx=18, pady=(12, 8))
+        ctk.CTkLabel(row, text='烧录对象', font=self._font(11, 'bold'),
+                     text_color=COLORS['text']).pack(side='left', padx=(0, 10))
+        return row
+
+    def _wireless_device_row(self, card, selector, host):
+        self._build_named_selector(card, selector)
+        row = ctk.CTkFrame(card, fg_color='transparent')
+        row.pack(fill='x', padx=18, pady=(0, 9))
+        ctk.CTkLabel(row, text='设备 IP', font=self._font(10, 'bold'),
+                     text_color=COLORS['muted']).pack(side='left', padx=(0, 9))
+        entry = self._new_entry(row, host, 'IPv4 地址', width=230)
+        entry.pack(side='left')
+        return entry
+
+    def _wireless_file_card(self, card, name, detail):
+        box = ctk.CTkFrame(card, fg_color=COLORS['soft'], corner_radius=12)
+        box.pack(fill='x', padx=18, pady=(0, 10))
+        box.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(box, textvariable=name,
+                     font=self._font(12, 'bold'), text_color=COLORS['text'],
+                     anchor='w').grid(row=0, column=0, sticky='ew', padx=14, pady=(13, 3))
+        ctk.CTkLabel(box, textvariable=detail,
+                     font=self._font(10), text_color=COLORS['cyan'], anchor='w',
+                     wraplength=600, justify='left').grid(
+                         row=1, column=0, sticky='ew', padx=14, pady=(0, 13))
+
+    def _wireless_task_progress(self, card, percent, status, captions):
+        heading = ctk.CTkFrame(card, fg_color='transparent')
+        heading.pack(fill='x', padx=18, pady=(6, 6))
+        ctk.CTkLabel(heading, text='任务进度', font=self._font(16, 'bold')).pack(side='left')
+        ctk.CTkLabel(heading, textvariable=percent, font=('Consolas', 23),
+                     text_color=COLORS['teal']).pack(side='right')
+        progress = ctk.CTkProgressBar(
+            card, height=9, corner_radius=6, progress_color=COLORS['teal'],
+            fg_color=COLORS['soft'],
+        )
+        progress.pack(fill='x', padx=18, pady=(0, 8))
+        progress.set(0)
+        stages = ctk.CTkFrame(card, fg_color='transparent')
+        stages.pack(fill='x', padx=18, pady=(0, 7))
+        labels = []
+        for i, caption in enumerate(captions):
+            stages.grid_columnconfigure(i, weight=1, uniform='phase')
+            label = ctk.CTkLabel(stages, text=caption, font=self._font(11, 'bold'),
+                                 text_color=COLORS['muted'])
+            label.grid(row=0, column=i, sticky='w')
+            labels.append(label)
+        ctk.CTkLabel(card, textvariable=status,
+                     font=self._font(10), text_color=COLORS['muted'],
+                     anchor='w', justify='left', wraplength=410).pack(fill='x', padx=18, pady=(0, 14))
+        return progress, labels
+
+    def _paint_wireless_stages(self, labels, active):
+        for i, label in enumerate(labels):
+            label.configure(text_color=COLORS['teal'] if i <= active else COLORS['muted'])
+
     def _build_wireless_hex_card(self, page):
         card = self._page_card(page, 1, pady=(0, 8))
 
-        target_row = ctk.CTkFrame(card, fg_color='transparent')
-        target_row.pack(fill='x', padx=18, pady=(12, 8))
-        ctk.CTkLabel(target_row, text='烧录对象', font=self._font(11, 'bold'),
-                     text_color=COLORS['text']).pack(side='left', padx=(0, 10))
+        target_row = self._wireless_target_row(card)
         self.w78_target_var = tk.StringVar(master=self.root, value='W78E516DDG')
         self.w78_target_selector = self._register_action(ctk.CTkComboBox(
             target_row, variable=self.w78_target_var,
@@ -1622,25 +1678,8 @@ class LocalTcpApp:
             card, text='请该型号暂不支持',
             fg_color=COLORS['warning_bg'], text_color=COLORS['warning_text'],
             corner_radius=8, anchor='w', justify='left')
-        self._build_named_selector(card, 'w78')
-        connection_row = ctk.CTkFrame(card, fg_color='transparent')
-        connection_row.pack(fill='x', padx=18, pady=(0, 9))
-        ctk.CTkLabel(connection_row, text='设备 IP', font=self._font(10, 'bold'),
-                     text_color=COLORS['muted']).pack(side='left', padx=(0, 9))
-        self.w78_host_entry = self._new_entry(
-            connection_row, self.w78_host_var, 'IPv4 地址', width=230)
-        self.w78_host_entry.pack(side='left')
-
-        file_box = ctk.CTkFrame(card, fg_color=COLORS['soft'], corner_radius=12)
-        file_box.pack(fill='x', padx=18, pady=(0, 10))
-        file_box.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(file_box, textvariable=self.w78_hex_name_var,
-                     font=self._font(12, 'bold'), text_color=COLORS['text'],
-                     anchor='w').grid(row=0, column=0, sticky='ew', padx=14, pady=(13, 3))
-        ctk.CTkLabel(file_box, textvariable=self.w78_hex_summary_var,
-                     font=self._font(10), text_color=COLORS['cyan'], anchor='w',
-                     wraplength=600, justify='left').grid(
-                         row=1, column=0, sticky='ew', padx=14, pady=(0, 13))
+        self.w78_host_entry = self._wireless_device_row(card, 'w78', self.w78_host_var)
+        self._wireless_file_card(card, self.w78_hex_name_var, self.w78_hex_summary_var)
         self.wireless_hex_actions = self._rail_card('w78', '任务操作')
         self.w78_hex_browse_button = self._rail_button(self.wireless_hex_actions, '选择文件', self._choose_w78_hex)
         self.w78_program_button = self._rail_button(self.wireless_hex_actions, '开始烧录', self._upload_w78_wireless, primary=True)
@@ -1650,30 +1689,9 @@ class LocalTcpApp:
         ctk.CTkLabel(link, textvariable=self.port_var, font=('Consolas', 12),
                      text_color=COLORS['muted']).pack(anchor='w', padx=12, pady=(0, 10))
 
-        heading = ctk.CTkFrame(card, fg_color='transparent')
-        heading.pack(fill='x', padx=18, pady=(6, 6))
-        ctk.CTkLabel(heading, text='任务进度', font=self._font(16, 'bold')).pack(side='left')
         self.w78_percent_var = tk.StringVar(master=self.root, value='0%')
-        ctk.CTkLabel(heading, textvariable=self.w78_percent_var, font=('Consolas', 23),
-                     text_color=COLORS['teal']).pack(side='right')
-        self.w78_progress = ctk.CTkProgressBar(
-            card, height=9, corner_radius=6, progress_color=COLORS['teal'],
-            fg_color=COLORS['soft'],
-        )
-        self.w78_progress.pack(fill='x', padx=18, pady=(0, 8))
-        self.w78_progress.set(0)
-        stages = ctk.CTkFrame(card, fg_color='transparent')
-        stages.pack(fill='x', padx=18, pady=(0, 7))
-        self.w78_stage_labels = []
-        for i, caption in enumerate(('01  接收', '02  写入', '03  校验')):
-            stages.grid_columnconfigure(i, weight=1, uniform='phase')
-            label = ctk.CTkLabel(stages, text=caption, font=self._font(11, 'bold'),
-                                 text_color=COLORS['muted'])
-            label.grid(row=0, column=i, sticky='w')
-            self.w78_stage_labels.append(label)
-        ctk.CTkLabel(card, textvariable=self.w78_progress_text_var,
-                     font=self._font(10), text_color=COLORS['muted'],
-                     anchor='w', justify='left', wraplength=410).pack(fill='x', padx=18, pady=(0, 14))
+        self.w78_progress, self.w78_stage_labels = self._wireless_task_progress(
+            card, self.w78_percent_var, self.w78_progress_text_var, ('01  接收', '02  写入', '03  校验'))
         self.w78_target_notice.pack(fill='x', padx=18, pady=(0, 10))
         self.w78_target_notice.pack_forget()
         self._select_w78_target(self.w78_target_var.get())

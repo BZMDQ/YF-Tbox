@@ -120,6 +120,31 @@ class ProxyTests(unittest.TestCase):
                 self.assertIn(expected, progress.call_args.args[1])
                 self.assertEqual([call.args[1] for call in request.call_args_list], [proxy.INFO, proxy.BEGIN])
 
+    def test_independent_profile_rejects_old_switching_receiver(self):
+        package = proxy.HardwarePackage(b'signed', 2, 'CS002', 'CS001', 'MIPI', 'GT9271', '800 × 1280')
+        previous = dict(info(), relay_hwcfg=1, usb_hwcfg=2)
+        with patch.object(proxy, 'connect', return_value=Mock()), \
+                patch.object(proxy, 'device_info', return_value=previous), \
+                patch.object(proxy, 'request') as request:
+            with self.assertRaisesRegex(ValueError, '1.0.178'):
+                proxy.install_hardware(SimpleNamespace(), b'k' * 32, package, Mock())
+        request.assert_not_called()
+
+    def test_independent_profile_verifies_registration_without_switching(self):
+        package = proxy.HardwarePackage(b'signed', 2, 'CS002', 'CS001', 'MIPI', 'GT9271', '800 × 1280')
+        previous = dict(info(), relay_hwcfg=1, usb_hwcfg=3, screen='CS000',
+                        screen_slot='CS000', screen_width=1024, screen_height=600,
+                        touch='GT911', screen_profiles='CS000=CS000;CS001=CS001;')
+        after = dict(previous, screen_profiles=previous['screen_profiles'] + 'CS002=CS001;')
+        with patch.object(proxy, 'connect', return_value=Mock()), \
+                patch.object(proxy, 'device_info', side_effect=[previous, after]), \
+                patch.object(proxy, 'request', return_value=b'CS002') as request:
+            result = proxy.install_hardware(SimpleNamespace(), b'k' * 32, package, Mock())
+        self.assertIn('CS002 已登记', result)
+        self.assertIn('当前屏幕 CS000', result)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_args.args[1], proxy.HARDWARE_CONFIG)
+
     def test_pc_declines_usb_update_before_any_task(self):
         app = SimpleNamespace(
             is_running=False, root=object(),
