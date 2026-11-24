@@ -1,6 +1,7 @@
 """连接与物理网卡缓存的定向验证；仅使用模拟接口及本机回环。"""
 import asyncio
 import concurrent.futures
+import ipaddress
 import socket
 import struct
 import sys
@@ -120,11 +121,10 @@ class DiscoverySchedulingTests(unittest.IsolatedAsyncioTestCase):
         primary_started = threading.Event()
         calls, results = [], []
 
-        def udp_discover(_targets, _routes, _cancel, publish):
+        def udp_discover(_targets, _routes, _networks, _priority, _startup,
+                         _cancelled, publish, _verified):
             self.assertTrue(primary_started.wait(3))
-            info = {'uid': 'AABBCC', 'port': 6123}
-            publish(ip, info)
-            return {ip: info}
+            publish(ip, {'uid': 'AABBCC', 'port': 6123})
 
         async def probe_one(address, port, _route, known=False, confirm=False):
             calls.append((port, confirm))
@@ -140,6 +140,51 @@ class DiscoverySchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [(5000, False), (6123, True)])
         self.assertEqual([value[0] for kind, value in results if kind == 'found'], [ip])
         self.assertIn(('retrying', 1), results)
+
+    async def test_startup_publishes_verified_devices_before_udp_and_starts_no_retry(self):
+        online, slow = '192.168.0.2', '192.168.0.3'
+        release_slow = asyncio.Event()
+        result_published = asyncio.Event()
+        udp_finished = threading.Event()
+        calls, results = [], []
+
+        def udp_discover(_targets, _routes, _networks, _priority, startup,
+                         cancelled, _publish, _verified):
+            self.assertTrue(startup)
+            while not cancelled():
+                time.sleep(0.005)
+            udp_finished.set()
+
+        async def probe_one(address, port, _route, known=False, confirm=False):
+            calls.append((address, confirm))
+            if address == slow:
+                await release_slow.wait()
+                return 'failed', (address, 'TCP 连接', '等待响应超时', False)
+            return 'found', (address, {'uid': 'AABBCC', 'device_name': '开发板'})
+
+        def emit(kind, value):
+            results.append((kind, value))
+            if kind == 'found':
+                result_published.set()
+
+        with patch.object(directory, 'udp_discover', side_effect=udp_discover), \
+                patch.object(directory, 'probe', side_effect=probe_one), \
+                patch.object(directory, 'scan_pass', wraps=directory.scan_pass) as passes:
+            task = asyncio.create_task(directory.scan_network(
+                [online, slow], {online: None, slow: None}, 5000, {slow}, True,
+                threading.Event(), emit))
+            try:
+                await asyncio.wait_for(result_published.wait(), 2)
+                self.assertFalse(udp_finished.is_set())
+                self.assertFalse(task.done())
+            finally:
+                release_slow.set()
+                await asyncio.wait_for(task, 2)
+        self.assertTrue(udp_finished.is_set())
+        self.assertCountEqual(calls, [(online, False), (slow, False)])
+        self.assertNotIn('retrying', [kind for kind, _value in results])
+        passes.assert_awaited_once()
+        self.assertEqual(passes.await_args.args[3], 2048)
 
     async def test_split_frames_and_legacy_fallback_use_identical_lnet_validation(self):
         body = '{"board":"STM32F750","uid":"ONE","device_name":"probe"}'.encode('ascii')
@@ -161,6 +206,20 @@ class DiscoverySchedulingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscoveryRangeTests(unittest.TestCase):
+    def test_udp_planning_uses_physical_broadcast_and_directed_fallback(self):
+        route = (3, '192.168.6.20')
+        addresses = ['192.168.5.25', '192.168.6.25', '192.168.9.25']
+        routes = dict.fromkeys(addresses, route)
+        networks = {route: ipaddress.IPv4Network('192.168.0.0/21')}
+        priority = {addresses[0]}
+        for startup in (True, False):
+            with self.subTest(startup=startup):
+                broadcasts, directed, deferred = directory._discovery_datagrams(
+                    addresses, routes, networks, priority, startup)[route]
+                self.assertEqual(broadcasts, {'192.168.7.255'})
+                self.assertEqual(directed, [addresses[0], addresses[2]])
+                self.assertEqual(deferred, [] if startup else [addresses[1]])
+
     def test_dnet_hint_requires_matching_origin_identity_nonce_and_crc(self):
         ip, uid, nonce = '192.168.1.25', b'P' * 12, 0x12345678
         payload = struct.pack('<HB', 6123, 2) + b'RD' + bytes([3]) + b'1.0'

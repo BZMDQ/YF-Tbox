@@ -63,7 +63,7 @@ class EventPumpPerformance(unittest.TestCase):
         app.device_scan_ranges = '192.168.1.1-192.168.1.10'
         app.device_scan_running = app.is_running = False
         app.device_startup_scan_started = False
-        app.device_scan_queue = queue.Queue()
+        app.device_scan_queue = queue.PriorityQueue()
         app.device_scan_cancel = threading.Event()
         app.device_online_ips = set()
         app.discovered_devices = set()
@@ -77,27 +77,34 @@ class EventPumpPerformance(unittest.TestCase):
         app._history_finish = app._set_status = app._append_log = lambda *_: None
         return app, counts, scheduled, button_updates
 
-    def test_scan_batches_progress_and_saves_found_devices_once(self):
-        app, counts, scheduled, button_updates = self.scan_app()
-        # 只注入扫描结果，避免启动网络探测或打开真实窗口。
-        with patch.object(device_directory.threading, 'Thread',
-                          return_value=SimpleNamespace(start=lambda: None)):
+    def test_scan_delivers_found_devices_before_failure_backlog_and_saves_once(self):
+        app, counts, scheduled, _ = self.scan_app()
+        pending = []
+
+        async def scan(_targets, _routes, _port, _priority, _startup, _cancel, publish, **_):
+            # 让确认结果排在大量超时之后到达，检查两个连续界面帧均能立即显示。
+            for _ in range(device_directory._SCAN_UI_BATCH * 2):
+                publish('first_failed', ('192.168.1.1', 'TCP', '', False))
+            for index in (2, 3):
+                ip = f'192.168.1.{index}'
+                publish('found', (ip, {'device_name': f'设备{index}', 'uid': str(index)}))
+                scheduled.pop(0)[1]()
+                self.assertIn(ip, app.device_online_ips)
+                self.assertEqual(counts['refresh'], index - 1)
+                self.assertEqual(counts['save'], 0)
+                self.assertTrue(app.device_scan_running)
+
+        with patch.object(device_directory, 'lan_interfaces', return_value=[]), \
+                patch.object(device_directory, 'scan_network', side_effect=scan), \
+                patch.object(device_directory.threading, 'Thread',
+                             side_effect=lambda target, **_: SimpleNamespace(start=lambda: pending.append(target))), \
+                patch.object(device_directory.time, 'perf_counter', return_value=0):
             app._discover_devices()
-        counts['render'] = 0
-        button_updates.clear()
-        for _ in range(device_directory._SCAN_UI_BATCH):
-            app.device_scan_queue.put(('first_failed', ('192.168.1.1', 'TCP', '', False)))
-        for index in (2, 3, 4):
-            ip = f'192.168.1.{index}'
-            app.device_scan_queue.put(('found', (ip, {'device_name': f'设备{index}', 'uid': str(index)})))
-        app.device_scan_queue.put(('done', None))
-        scheduled.pop(0)[1]()
-        self.assertEqual(len(button_updates), 1)
-        self.assertEqual(scheduled[0][0], 10)
-        self.assertEqual(counts, dict(save=0, refresh=0, render=0))
-        scheduled.pop(0)[1]()
-        self.assertEqual(counts, dict(save=1, refresh=1, render=1))
-        self.assertEqual(len(app.device_online_ips), 3)
+            self.assertEqual(scheduled[0][0], device_directory._SCAN_UI_INTERVAL_MS)
+            pending.pop(0)()
+            while scheduled:
+                scheduled.pop(0)[1]()
+        self.assertEqual(counts, dict(save=1, refresh=3, render=1))
         self.assertFalse(app.device_scan_running)
         self.assertTrue(app.device_scan_queue.empty())
 

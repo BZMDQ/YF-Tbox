@@ -43,7 +43,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.76'
+APP_VERSION = '0.8.77'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -689,6 +689,8 @@ def normalize_device_info(data):
 class LocalTcpApp:
     def __init__(self, root):
         self.root = root
+        # 创建界面时同步启动网卡枚举，启动扫描可直接复用缓存。
+        threading.Thread(target=self._prewarm_network, name='LAN-prewarm', daemon=True).start()
         self.device_received_var = tk.StringVar(master=root, value='尚未收到设备数据')
         self.device_info_cache = None
         logo = Image.open(app_resource_path(APP_LOGO_FILE)).convert('RGBA')
@@ -853,8 +855,6 @@ class LocalTcpApp:
             self._append_log('未导入 Key：仍可读取设备信息；进行 OTA 时需在开发板确认。')
         self.root.after(UI_FRAME_INTERVAL_MS, self._poll_events)
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
-        # 提前查询物理网卡，点击连接时直接使用短期缓存；此处不访问开发板。
-        threading.Thread(target=self._prewarm_network, name='LAN-prewarm', daemon=True).start()
 
     @staticmethod
     def _prewarm_network():

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from collections import deque
+from itertools import count
 import errno
 import copy
 import ipaddress
@@ -32,9 +34,10 @@ _SCAN_FIRST_LIMIT = 1024
 _SCAN_RETRY_LIMIT = 512
 _SCAN_STARTUP_LIMIT = 2048
 _SCAN_UI_BATCH = 128
-_SCAN_UDP_WINDOW = 2.0
-_SCAN_UDP_RETRY_AT = 0.7
-_SCAN_UDP_HEAD_START = 0.20
+_SCAN_UI_INTERVAL_MS = 16
+_SCAN_UDP_WINDOW = 0.65
+_SCAN_UDP_DIRECT_AT = 0.12
+_SCAN_UDP_HEAD_START = 0.05
 _SCAN_TUN_NETWORK = ipaddress.IPv4Network('198.18.0.0/15')
 
 
@@ -279,19 +282,34 @@ def _udp_candidate(packet, sender, allowed, uid, nonce):
     }
 
 
-def udp_discover(targets, routes, cancel, publish):
-    """每个地址走一次选定网卡，DNET 候选交给 TCP 核验。"""
+def _discovery_datagrams(targets, routes, networks, priority, startup):
     groups = {}
     for ip in targets:
         route = routes[ip]
-        if route:
-            groups.setdefault(route, []).append(ip)
+        if route is None:
+            continue
+        broadcasts, directed, deferred = groups.setdefault(route, (set(), [], []))
+        network = networks.get(route)
+        if network is not None and network.prefixlen < 31 and ipaddress.IPv4Address(ip) in network:
+            # 按物理网卡真实的子网掩码广播，同一网段只发一次。
+            broadcasts.add(str(network.broadcast_address))
+            if ip not in priority:
+                if not startup:
+                    deferred.append(ip)
+                continue
+        directed.append(ip)
+    return groups
+
+
+def udp_discover(targets, routes, networks, priority, startup, cancelled, publish, verified):
+    """广播加定向发现，只为 TCP 提供候选端口和身份。"""
+    groups = _discovery_datagrams(targets, routes, networks, priority, startup)
     allowed, found = set(targets), {}
     sockets = {}
     uid = os.urandom(12)
     nonce = int.from_bytes(os.urandom(4), 'little')
     try:
-        for (index, source), addresses in groups.items():
+        for (index, source), (broadcasts, directed, deferred) in groups.items():
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -302,38 +320,40 @@ def udp_discover(targets, routes, cancel, publish):
                                      socket.inet_aton(source))
                 body = header + struct.pack('<H', sock.getsockname()[1])
                 packet = body + struct.pack('<I', zlib.crc32(body) & 0xffffffff)
-                broadcasts = {str(ipaddress.IPv4Network(ip + '/24', strict=False).broadcast_address)
-                              for ip in addresses}
-                sockets[sock] = packet, broadcasts, addresses
+                first = deque(dict.fromkeys((*broadcasts, *directed)))
+                sockets[sock] = packet, first, deque(deferred)
             except OSError:
                 sock.close()
         if not sockets:
-            return found
+            return
 
         start = time.monotonic()
-        sent_round = -1
-        while not cancel.is_set() and found.keys() < allowed:
+        listeners = list(sockets)
+        while not cancelled() and len(found) < len(allowed):
             elapsed = time.monotonic() - start
             if elapsed >= _SCAN_UDP_WINDOW:
                 break
-            round_no = int(elapsed >= _SCAN_UDP_RETRY_AT)
-            if round_no != sent_round:
-                sent_round = round_no
-                for sock, (packet, broadcasts, addresses) in sockets.items():
-                    # 先发广播，单播补齐跨网段地址；第二轮跳过已应答地址。
-                    for destination in (*broadcasts, *addresses):
-                        if cancel.is_set():
-                            return found
-                        if destination in found:
-                            continue
-                        try:
-                            sock.sendto(packet, (destination, 5000))
-                        except OSError:
-                            pass
+            sending = False
+            for sock, (packet, first, deferred) in sockets.items():
+                outgoing = first if first or elapsed < _SCAN_UDP_DIRECT_AT else deferred
+                # 收发交错，避免长地址范围的发送占满网卡或挤掉已到达的应答。
+                for _ in range(min(64, len(outgoing))):
+                    if cancelled():
+                        return
+                    destination = outgoing.popleft()
+                    if destination in found or verified(destination):
+                        continue
+                    try:
+                        sock.sendto(packet, (destination, 5000))
+                    except BlockingIOError:
+                        outgoing.appendleft(destination)
+                        break
+                    except OSError:
+                        pass
+                sending |= bool(first or (elapsed >= _SCAN_UDP_DIRECT_AT and deferred))
 
-            readable, _, _ = select.select(list(sockets), [], [], 0.05)
+            readable, _, _ = select.select(listeners, [], [], 0.002 if sending else 0.020)
             for sock in readable:
-                # 一次就绪读取一批，避免大量响应反复调用 select。
                 for _ in range(64):
                     try:
                         packet, sender = sock.recvfrom(512)
@@ -348,7 +368,6 @@ def udp_discover(targets, routes, cancel, publish):
                         if ip not in found:
                             found[ip] = info
                             publish(ip, info)
-        return found
     finally:
         for sock in sockets:
             sock.close()
@@ -496,30 +515,52 @@ def _uid(info):
     return '' if uid == 'D133CBS-UNKNOWN' else uid
 
 
-async def scan_network(targets, routes, port, priority, startup, cancel, emit):
-    """UDP 提供端口和 UID，所有在线结果均使用只读 TCP 请求确认。"""
+async def scan_network(targets, routes, port, priority, startup, cancel, emit, *, networks=None):
+    """核验通过就发布结果，补扫只用于手动扫描。"""
     loop = asyncio.get_running_loop()
     hints = {}
-    waiting_for_udp = []
+    verified_ips = set()
+    discovery_lock = threading.Lock()
+    udp_stop = threading.Event()
     failures = {}
     found_uids = {}
     first_limit = _SCAN_STARTUP_LIMIT if startup else _SCAN_FIRST_LIMIT
+
+    def cache_hint(ip, info):
+        with discovery_lock:
+            hints[ip] = info
+
+    def verified(ip):
+        with discovery_lock:
+            return ip in verified_ips
+
+    async def check(ip, confirm=False):
+        with discovery_lock:
+            hint = hints.get(ip)
+        # 上报端口可用时按其核对 UID，使用配置端口时以 TCP 返回的身份为准。
+        if confirm and failures[ip][1] == 'UID 核验':
+            hint = None
+        selected_port = hint['port'] if hint else port
+        kind, value = await probe(ip, selected_port, routes[ip],
+                                  known=ip in priority or hint is not None, confirm=confirm)
+        if kind == 'found' and hint and selected_port != port and _uid(value[1]) != hint['uid']:
+            return 'failed', (ip, 'UID 核验', 'UDP 与 TCP 返回的设备身份不同', True)
+        return kind, value
 
     def record(result, retry=False):
         kind, value = result
         if kind == 'found':
             ip, info = value
             uid = _uid(info)
-            expected = hints.get(ip, {}).get('uid')
             duplicate = found_uids.get(uid) if uid else None
-            if expected and uid != expected:
-                kind, value = 'failed', (ip, 'UID 核验', 'UDP 与 TCP 返回的设备身份不同', True)
-            elif duplicate and duplicate != ip:
+            if duplicate and duplicate != ip:
                 kind, value = 'failed', (ip, 'UID 去重', f'同一台设备已通过 {duplicate} 确认在线', True)
             else:
                 if uid:
                     found_uids[uid] = ip
                 emit('found', value)
+            with discovery_lock:
+                verified_ips.add(ip)
         if kind == 'failed':
             if not retry:
                 failures[value[0]] = value
@@ -529,43 +570,29 @@ async def scan_network(targets, routes, port, priority, startup, cancel, emit):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=_SCAN_THREAD_CAP + 1,
                                                thread_name_prefix='设备扫描') as pool:
-        async def collect_udp():
-            udp_result = await loop.run_in_executor(
-                pool, udp_discover, targets, routes, cancel,
-                lambda ip, info: loop.call_soon_threadsafe(hints.__setitem__, ip, info),
-            )
-            hints.update(udp_result)
-            if not cancel.is_set():
-                for result in waiting_for_udp:
-                    record(result)
-                emit('note', f'UDP 发现 {len(hints)} 个候选地址，在线设备以 TCP 核验为准。')
-            waiting_for_udp.clear()
-
-        udp = asyncio.create_task(collect_udp())
+        udp = loop.run_in_executor(
+            pool, udp_discover, targets, routes, networks or {}, priority, startup,
+            lambda: cancel.is_set() or udp_stop.is_set(), cache_hint, verified,
+        )
         try:
-            # 给 UDP 短暂先行时间，其余等待与 TCP 首轮重叠。
+            # 短暂让广播先行。后续不断读取新候选，TCP 结果不等待 UDP 收尾。
             await asyncio.wait((udp,), timeout=_SCAN_UDP_HEAD_START)
+            with discovery_lock:
+                preferred = set(hints)
+            ordered = sorted(targets, key=lambda ip: (ip not in preferred, ip not in priority))
+            label = '启动扫描' if startup else 'TCP 首轮'
+            emit('note', f'{label}并发上限 {first_limit}，共 {len(ordered)} 个地址。')
+            await scan_pass(ordered, check, cancel, first_limit, record, pool)
+
+            if startup or cancel.is_set() or not failures:
+                return
+            # 本轮失败项可能有迟到的端口提示，只在手动扫描的补扫前读取。
+            try:
+                await udp
+            except OSError:
+                pass
             if cancel.is_set():
                 return
-            ordered = sorted(targets, key=lambda ip: (ip not in hints, ip not in priority))
-            first_ports = {ip: info['port'] for ip, info in hints.items()}
-            emit('note', f'TCP 首轮并发上限 {first_limit}，本轮 {len(ordered)} 个地址。')
-
-            async def first(ip):
-                return await probe(ip, first_ports.get(ip, port), routes[ip],
-                                   known=ip in priority or ip in first_ports)
-
-            def first_result(result):
-                if result[0] == 'found' and not udp.done() and result[1][0] not in hints:
-                    waiting_for_udp.append(result)
-                else:
-                    record(result)
-
-            await scan_pass(ordered, first, cancel, first_limit, first_result, pool)
-            await udp
-            if cancel.is_set():
-                return
-
             pending = [
                 ip for ip, stage, error, protocol in failures.values()
                 if stage != 'UID 去重' and (
@@ -577,18 +604,11 @@ async def scan_network(targets, routes, port, priority, startup, cancel, emit):
                 return
             pending.sort(key=lambda ip: (ip not in hints, ip not in priority))
             emit('retrying', len(pending))
-            # 给刚释放连接的设备留出处理时间，再复核需要补扫的地址。
-            await asyncio.sleep(0.20)
-
-            async def retry(ip):
-                hint = hints.get(ip, {})
-                return await probe(ip, hint.get('port', port), routes[ip],
-                                   known=ip in priority or ip in hints, confirm=True)
-
-            await scan_pass(pending, retry, cancel, _SCAN_RETRY_LIMIT,
+            await scan_pass(pending, lambda ip: check(ip, confirm=True), cancel, _SCAN_RETRY_LIMIT,
                             lambda result: record(result, retry=True), pool)
         finally:
-            # 等 UDP 线程释放自己的套接字后再关闭事件循环。
+            # 本轮工作完成后及时释放 UDP 套接字。
+            udp_stop.set()
             await asyncio.gather(udp, return_exceptions=True)
 
 
@@ -636,7 +656,7 @@ def install(gui):
         app.device_startup_scan_started = False
         app.device_rows_need_refresh = False
         app.device_online_ips = set()
-        app.device_scan_queue = queue.Queue()
+        app.device_scan_queue = queue.PriorityQueue()
         app.device_scan_cancel = threading.Event()
         app.device_save_after = None
         app.device_name_drafts = {}
@@ -984,8 +1004,11 @@ def install(gui):
         known = tuple(app.device_names)
         priority = set(known) | {current}
 
+        order = count()
+
         def publish(kind, value):
-            app.device_scan_queue.put((kind, value))
+            # 已核验设备优先进入界面，超时和失败等进度消息按原顺序处理。
+            app.device_scan_queue.put((kind != 'found', next(order), kind, value))
 
         def worker():
             failure = None
@@ -1003,7 +1026,10 @@ def install(gui):
                     publish('interfaces', names)
                     if targets and not cancel.is_set():
                         routes = {ip: _choose_route(ipaddress.IPv4Address(ip), route_table) for ip in targets}
-                        asyncio.run(scan_network(targets, routes, port, priority, startup, cancel, publish))
+                        networks = {(index, source): network
+                                    for network, _metric, index, source, _gateway in route_table}
+                        asyncio.run(scan_network(targets, routes, port, priority, startup, cancel,
+                                                 publish, networks=networks))
             except Exception as exc:
                 failure = str(exc) or type(exc).__name__
             if cancel.is_set():
@@ -1015,13 +1041,10 @@ def install(gui):
 
         threading.Thread(target=worker, name='设备扫描调度', daemon=True).start()
 
-        next_refresh_at = 0.0
-        rows_dirty = False
-
         def poll():
-            nonlocal next_refresh_at, rows_dirty
             handled = False
-            next_poll_ms = 100
+            rows_dirty = False
+            next_poll_ms = _SCAN_UI_INTERVAL_MS
             deadline = time.perf_counter() + 0.010
             found_messages = []
             terminal = None
@@ -1031,7 +1054,7 @@ def install(gui):
                     next_poll_ms = 10
                     break
                 try:
-                    kind, value = app.device_scan_queue.get_nowait()
+                    _rank, _seq, kind, value = app.device_scan_queue.get_nowait()
                 except queue.Empty:
                     break
                 handled = True
@@ -1111,11 +1134,11 @@ def install(gui):
                         app.device_rows_need_refresh = True
                 return
 
-            now = time.monotonic()
-            if rows_dirty and now >= next_refresh_at:
+            if rows_dirty:
+                # 本帧合并新增设备，实时刷新总览和下拉列表。
                 app._refresh_device_choices()
-                next_refresh_at = now + 0.25
-                rows_dirty = False
+                if hasattr(app, 'device_rows'):
+                    app.device_rows_need_refresh = True
             if handled:
                 if app.device_scan_phase == 2:
                     progress = f'补扫 {app.device_scan_retry_checked}/{app.device_scan_retry_total}'
@@ -1124,7 +1147,7 @@ def install(gui):
                 app.device_scan_button.configure(text=progress)
             app.root.after(next_poll_ms, poll)
 
-        app.root.after(100, poll)
+        app.root.after(_SCAN_UI_INTERVAL_MS, poll)
 
     def cancel_discovery(app):
         # 套接字由各扫描线程释放，界面只发送停止信号。
