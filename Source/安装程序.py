@@ -17,7 +17,7 @@ import zipfile
 import uuid
 
 APP_NAME = '研发工具箱'
-APP_VERSION = '0.8.75'
+APP_VERSION = '0.8.76'
 PAYLOAD_FILE = 'toolbox_payload.zip'
 EXE_NAME = 'ResearchToolbox_' + APP_VERSION + '.exe'
 PAYLOAD_ROOT = APP_NAME + '_' + APP_VERSION + '_Onedir_Portable_Windows'

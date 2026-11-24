@@ -43,7 +43,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.75'
+APP_VERSION = '0.8.76'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -2971,6 +2971,9 @@ class LocalTcpApp:
                 return
         else:
             args, key = None, None
+        if getattr(self, 'device_scan_running', False):
+            # 新的业务连接开始时释放扫描资源，避免争用同一设备。
+            self._cancel_device_scan()
         self._save_settings()
         if args is not None:
             self.connection_summary_var.set(f'{args.host}:{args.port}')
@@ -3164,7 +3167,7 @@ class LocalTcpApp:
             count = len(pending)
             pending.clear()
             self._append_log(f'已取消 {count} 个等待发送的设备名称。')
-        if getattr(self, 'device_scan_running', False):
+        if getattr(self, 'device_scan_running', False) and not self.is_running:
             self._cancel_device_scan()
             self.stop_button.configure(state=tk.DISABLED)
             self._set_status('正在停止设备扫描…')
@@ -5219,6 +5222,9 @@ def main():
     except (OSError, tk.TclError):
         pass
     app = LocalTcpApp(root)
+    # 界面完成创建后自动扫描一次，启动检查模式不调用这里。
+    if hasattr(app, '_discover_devices'):
+        root.after_idle(lambda: app._discover_devices(startup=True))
     # Capture a useful Python stack if the UI stops servicing events.
     try:
         import faulthandler

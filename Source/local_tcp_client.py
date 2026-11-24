@@ -101,20 +101,32 @@ class SocketReader:
         return data
 
 
-def receive(sock, reader=None):
-    read_exact = reader.exact if reader is not None else lambda count: exact(sock, count)
-    # 整帧读齐才消费头部，避免正文分段到达时一次超时破坏流对齐。
-    buffered = isinstance(reader, SocketReader)
-    header = reader.peek(HEADER.size) if buffered else read_exact(HEADER.size)
+def response_header(header):
+    """读取并检查 LNET 响应头，供同步连接和异步发现共用。"""
     magic, op, status, size, crc = HEADER.unpack(header)
     if magic != b'LNET' or size > 1024:
         raise ValueError('无效响应头')
-    body = (read_exact(HEADER.size + size)[HEADER.size:] if buffered else read_exact(size))
+    return op, status, size, crc
+
+
+def checked_response(header, body, fields):
+    op, status, _size, crc = fields
     if zlib.crc32(body, zlib.crc32(header[:16])) & 0xffffffff != crc:
         raise ValueError('响应 CRC 校验失败')
     if status:
         raise DeviceError(status)
     return op, body
+
+
+def receive(sock, reader=None):
+    read_exact = reader.exact if reader is not None else lambda count: exact(sock, count)
+    # 整帧读齐才消费头部，避免正文分段到达时一次超时破坏流对齐。
+    buffered = isinstance(reader, SocketReader)
+    header = reader.peek(HEADER.size) if buffered else read_exact(HEADER.size)
+    fields = response_header(header)
+    size = fields[2]
+    body = (read_exact(HEADER.size + size)[HEADER.size:] if buffered else read_exact(size))
+    return checked_response(header, body, fields)
 
 
 def request(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,

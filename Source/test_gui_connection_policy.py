@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import queue
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import device_directory
 import local_tcp_gui as gui
@@ -43,7 +43,7 @@ class EventPumpPerformance(unittest.TestCase):
             scheduled.pop(0)()
         self.assertEqual(seen, list(range(count)))
 
-    def test_scan_batches_progress_and_saves_found_devices_once(self):
+    def scan_app(self):
         class ScanApp(gui.LocalTcpApp):
             pass
 
@@ -62,6 +62,7 @@ class EventPumpPerformance(unittest.TestCase):
         app.stop_button = SimpleNamespace(configure=lambda **_: None)
         app.device_scan_ranges = '192.168.1.1-192.168.1.10'
         app.device_scan_running = app.is_running = False
+        app.device_startup_scan_started = False
         app.device_scan_queue = queue.Queue()
         app.device_scan_cancel = threading.Event()
         app.device_online_ips = set()
@@ -74,7 +75,10 @@ class EventPumpPerformance(unittest.TestCase):
         app._render_device_rows = lambda: tick('render')
         app._history_start = lambda *_: 'scan'
         app._history_finish = app._set_status = app._append_log = lambda *_: None
+        return app, counts, scheduled, button_updates
 
+    def test_scan_batches_progress_and_saves_found_devices_once(self):
+        app, counts, scheduled, button_updates = self.scan_app()
         # 只注入扫描结果，避免启动网络探测或打开真实窗口。
         with patch.object(device_directory.threading, 'Thread',
                           return_value=SimpleNamespace(start=lambda: None)):
@@ -96,6 +100,26 @@ class EventPumpPerformance(unittest.TestCase):
         self.assertEqual(len(app.device_online_ips), 3)
         self.assertFalse(app.device_scan_running)
         self.assertTrue(app.device_scan_queue.empty())
+
+    def test_startup_scan_runs_once_with_2048_distinct_addresses_in_saved_range(self):
+        app, _, scheduled, _ = self.scan_app()
+        app.device_scan_ranges = '10.0.0.1-10.0.11.254'
+        app.host_var = SimpleNamespace(get=lambda: '10.0.10.99')
+        scan = AsyncMock()
+        with patch.object(device_directory, 'lan_interfaces', return_value=[]), \
+                patch.object(device_directory, 'scan_network', scan), \
+                patch.object(device_directory.threading, 'Thread',
+                             side_effect=lambda target, **_: SimpleNamespace(start=target)):
+            app._discover_devices(startup=True)
+            scheduled.pop(0)[1]()
+            app._discover_devices(startup=True)
+        scan.assert_awaited_once()
+        targets, _, _, _, startup = scan.await_args.args[:5]
+        self.assertTrue(startup)
+        self.assertEqual(len(targets), 2048)
+        self.assertEqual(len(set(targets)), 2048)
+        self.assertEqual(targets[0], '10.0.10.99')
+        self.assertFalse(app.device_scan_running)
 
 
 class GuiConnectionPolicy(unittest.TestCase):
