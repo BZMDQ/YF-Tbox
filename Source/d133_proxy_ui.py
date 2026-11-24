@@ -3,7 +3,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import d133_proxy_client as proxy
-from device_directory import normalize_ipv4
+import wireless_batch
 
 
 SYSTEM_STAGES = ('01  接收', '02  写入', '03  校验')
@@ -110,7 +110,7 @@ def start_update(app):
     if app.is_running:
         return
     try:
-        args, key = app._connection_inputs(host_override=normalize_ipv4(app.d133_proxy_host_var.get().strip()))
+        targets, key = wireless_batch.inputs(app, 'd133')
         if len(key) != 32:
             raise ValueError('请在设置中导入当前F750的配套32字节Local TCP Key')
         if app.d133_proxy_path is None:
@@ -120,52 +120,43 @@ def start_update(app):
         messagebox.showerror('无法经F750更新D133', str(exc), parent=app.root)
         return
     hardware = isinstance(package, proxy.HardwarePackage)
-    target = f'F750 {args.host}:{args.port}\n'
+    target_text = wireless_batch.confirmation_targets(targets) + '\n'
     if hardware:
-        text = target + (f'{package.code} · {package.resolution}\n{package.panel} · {package.touch}\n\n'
-                         '登记后继续使用当前屏幕。可在 F750 的 USB 控制中切换。')
+        text = target_text + (f'{package.code} · {package.resolution}\n{package.panel} · {package.touch}\n\n'
+                              '登记后继续使用当前屏幕。可在 F750 的 USB 控制中切换。')
     else:
-        text = target + (f'D133 目标版本 {package.version}\n{app.d133_proxy_path.name}\n'
-                         f'{app.d133_proxy_signature.name}\n\n更新非活动系统槽，请保持供电和 USB 连接。')
+        text = target_text + (f'D133 目标版本 {package.version}\n{app.d133_proxy_path.name}\n'
+                              f'{app.d133_proxy_signature.name}\n\n更新非活动系统槽，请保持供电和 USB 连接。')
     if not messagebox.askyesno('确认 D133 USB 更新', text, parent=app.root):
         return
-    app.d133_proxy_running = True
-    app.d133_proxy_committed = False
     app.d133_proxy_hardware = hardware
     d133_render_package(app, hardware)
-    path, signature = app.d133_proxy_path, app.d133_proxy_signature
 
-    def action(_args, _key, stop):
+    def program(target):
         def progress(percent, message):
-            app._post('d133_proxy_progress', (percent, message))
-
-        def committed():
-            app.d133_proxy_committed = True
-            app._post('d133_proxy_commit')
+            # 最后一块数据的确认仍在写入阶段，提交之后才显示校验阶段。
+            verifying = percent >= 70 if hardware else target.committed
+            stage = 2 if verifying else int(percent > 0)
+            target.progress(percent, message, stage)
 
         try:
             if hardware:
-                message = proxy.install_hardware(args, key, package, progress, stop, committed)
+                message = proxy.install_hardware(target.args, target.key, package, progress,
+                                                 target.cancel, target.mark_committed)
             else:
-                version = proxy.upload(args, key, path, progress, stop, committed, signature)
-                message = f'D133 {version}更新完成；新版本、预定非活动槽与健康确认均已核对。'
-            progress(100, message)
-            app._post('log', message)
-            app._post('status', message if hardware else 'D133重启与健康核对完成')
+                version = proxy.upload_package(target.args, target.key, package, progress,
+                                               target.cancel, target.mark_committed)
+                message = f'D133 {version} 更新完成，新版本、目标槽及健康确认已核对。'
+        except proxy.HardwareConfigRejected:
+            target.reject_commit()
+            raise
         except Exception as exc:
-            # 此动作自己保留“已提交/未知”结论，避免通用任务框架把它改写为“已取消”。
-            message = str(exc)
-            if isinstance(exc, proxy.HardwareConfigRejected):
-                app.d133_proxy_committed = False
-            if app.d133_proxy_committed and not hardware:
-                message += '\n提交请求已发出；不能撤销，未确认新系统健康。'
-            progress(100 if app.d133_proxy_committed else 0, message)
-            app._post('log', 'D133经F750 USB：' + message)
-            app._post('status', 'D133 配置状态待核对' if hardware and app.d133_proxy_committed else
-                      'D133已提交，健康待核对' if app.d133_proxy_committed else 'D133更新未完成')
-        finally:
-            app._post('d133_proxy_finished')
-    app._start_task('D133 屏幕配置登记' if hardware else 'D133经F750 USB A/B更新',
-                    action, require_connection=False)
-    if not app.is_running:
-        app.d133_proxy_running = False
+            if target.committed:
+                # 已提交的目标只结束本机核对，保持每台的真实事务结果。
+                return 'pending', str(exc)
+            raise
+        target.log(message)
+        return message
+
+    title = 'D133 屏幕配置登记' if hardware else 'D133经F750 USB A/B更新'
+    wireless_batch.start(app, 'd133', title, targets, key, program)

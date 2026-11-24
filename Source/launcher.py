@@ -85,6 +85,12 @@ def main() -> None:
                 assert app.wireless_mode_var.get() == gui.WIRELESS_HEX_MODE
                 assert app.wireless_hex_card.winfo_manager() == 'grid'
                 assert not app.wireless_d133_card.winfo_manager()
+                hex_targets = app.wireless_targets['hex']
+                for address in ('192.0.2.10', '192.0.2.11', '192.0.2.11'):
+                    app.w78_host_var.set(address)
+                    hex_targets.add_button.invoke()
+                assert hex_targets.hosts == ['192.0.2.10', '192.0.2.11']
+                assert list(hex_targets.rows) == hex_targets.hosts
                 app.wireless_d133_choice.invoke()
                 assert app.active_page_key == 'w78' and app.wireless_mode_var.get() == gui.WIRELESS_D133_MODE
                 assert app.wireless_d133_card.winfo_manager() == 'grid'
@@ -93,6 +99,13 @@ def main() -> None:
                                if isinstance(widget, gui.ctk.CTkEntry)]
                 assert usb_entries == [app.d133_proxy_host_entry], "USB 页应只保留 IP 输入"
                 assert len(app.d133_proxy_stage_labels) == len(app.w78_stage_labels) == 3
+                usb_targets = app.wireless_targets['d133']
+                assert not usb_targets.hosts and list(hex_targets.rows) == hex_targets.hosts
+                app.d133_proxy_host_var.set('192.0.2.20')
+                usb_targets.add_button.invoke()
+                assert list(usb_targets.rows) == ['192.0.2.20']
+                usb_targets.rows['192.0.2.20'][2].invoke()
+                assert not usb_targets.hosts and not usb_targets.rows
                 app.wireless_hex_choice.invoke()
                 assert app.wireless_mode_var.get() == gui.WIRELESS_HEX_MODE
                 assert app.wireless_hex_card.winfo_manager() == 'grid'

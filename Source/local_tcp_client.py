@@ -201,14 +201,20 @@ def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None
 
 def request_wait(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
                  reader=None, cancel=None, timeout=120, ignore_ops=(),
-                 on_ignored=None):
+                 on_ignored=None, before_send=None):
     """发送一次请求，在可取消的短超时轮询中等待完整响应。"""
     packet = frame(op, offset, payload)
-    if send_lock is None:
+    def send():
+        _check_cancel(cancel)
+        if before_send is not None:
+            before_send()
         sock.sendall(packet)
+
+    if send_lock is None:
+        send()
     else:
         with send_lock:
-            sock.sendall(packet)
+            send()
 
     expected = op | 0x80000000
     ignored = {value | 0x80000000 for value in ignore_ops}
@@ -240,7 +246,12 @@ def request_wait(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
                 continue
             raise ValueError('响应命令不匹配')
     finally:
-        sock.settimeout(old_timeout)
+        try:
+            sock.settimeout(old_timeout)
+        except OSError:
+            # 停止操作可能已经关闭套接字，保留原来的接收或取消结果。
+            if cancel is None or not cancel.is_set():
+                raise
 
 
 def upload_w78_window(sock, package, logical_chunk_size, session_id, stop_event,

@@ -1,5 +1,5 @@
 """Simple Windows GUI for the authenticated Local TCP / OTA client."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import http.client
@@ -38,11 +38,12 @@ from local_tcp_client import (
 )
 import boot_update_ui
 import d133_proxy_ui
+import wireless_batch
 from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.74'
+APP_VERSION = '0.8.75'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -1237,7 +1238,11 @@ class LocalTcpApp:
         self._show_page('home')
 
     def _confirm_stop(self):
-        if getattr(self, 'd133_proxy_running', False):
+        job = getattr(self, 'wireless_batch_job', None)
+        if job is not None:
+            text = ('停止烧录？已开始写入的目标可能需要重新烧录。' if job.kind == 'hex'
+                    else '停止当前操作？已提交的 D133 会继续处理，工具箱将停止等待。')
+        elif getattr(self, 'd133_proxy_running', False):
             text = ('已提交。停止后，D133 仍会完成升级。' if self.d133_proxy_committed
                     else '停止更新？已写入的数据不会切换启动槽。')
         elif getattr(self, 'w78_program_started', False):
@@ -1619,6 +1624,8 @@ class LocalTcpApp:
                      text_color=COLORS['muted']).pack(side='left', padx=(0, 9))
         entry = self._new_entry(row, host, 'IPv4 地址', width=230)
         entry.pack(side='left')
+        wireless_batch.build_picker(self, 'hex' if selector == 'w78' else 'd133',
+                                    card, row, host, COLORS)
         return entry
 
     def _wireless_file_card(self, card, name, detail):
@@ -2656,6 +2663,8 @@ class LocalTcpApp:
                         self._update_ota_batch_progress()
                 elif kind == 'ota_batch_status':
                     self._set_status(value)
+                elif kind == 'wireless_target':
+                    wireless_batch.handle_event(self, value)
                 elif kind == 'w78_progress':
                     sent, total, label = value
                     fraction = min(1.0, sent / total) if total else 0.0
@@ -2692,6 +2701,7 @@ class LocalTcpApp:
             self.root.after(UI_FRAME_INTERVAL_MS, self._poll_events)
 
     def _finish_task(self):
+        self.wireless_batch_job = None
         with self.socket_lock:
             self.active_ota_sockets.clear()
             self.ota_socket_cancel_allowed.clear()
@@ -2727,6 +2737,8 @@ class LocalTcpApp:
         state = tk.NORMAL if enabled else tk.DISABLED
         for widget in self.action_widgets:
             widget.configure(state=state)
+        for panel in getattr(self, 'wireless_targets', {}).values():
+            panel.enable(enabled)
         if hasattr(self, 'w78_target_var'):
             self._select_w78_target(self.w78_target_var.get())
         self._refresh_boot_controls()
@@ -2993,8 +3005,10 @@ class LocalTcpApp:
                 # 正常返回只说明工具箱任务结束，不能证明每个目标升级成功。
                 result = '已结束'
                 try:
-                    action(args, key, stop_event)
-                    if stop_event.is_set():
+                    task_result = action(args, key, stop_event)
+                    if isinstance(task_result, str):
+                        result = task_result
+                    elif stop_event.is_set():
                         result = '已停止等待'
                 except InterruptedError:
                     result = '已停止等待'
@@ -3163,6 +3177,11 @@ class LocalTcpApp:
             self._finish_task()
             self._set_status('已停止')
             self._append_log('已清理未运行的任务状态，操作已停止。')
+            return
+        if wireless_batch.stop(self, frame(13)):
+            self.stop_button.configure(state=tk.DISABLED, fg_color=COLORS['error_bg'],
+                                       hover_color='#FECACA', text_color=COLORS['error_text'])
+            self._set_status('正在停止无线烧录…')
             return
         if self.d133_proxy_running:
             d133_proxy_ui.stop_operation(self)
@@ -4548,7 +4567,7 @@ class LocalTcpApp:
 
         self._start_task('MPLAB PICkit 3 烧录 HEX 文件', action, require_connection=False)
 
-    def _report_w78_failure(self, sock, error):
+    def _report_w78_failure(self, sock, error, target):
         detail = {
             8: 'HEX 格式、记录校验和或 APROM 地址错误',
             9: 'F750 DTA/RST 控制 GPIO 初始化或电平自检失败',
@@ -4564,9 +4583,10 @@ class LocalTcpApp:
             19: 'W78 操作已停止；如已擦写，目标保持复位',
             20: 'W78 RST 或 LDROM 选通电平检查失败；请查看引脚诊断',
         }.get(error, f'设备错误代码 {error}')
+        target.reject_commit()
         try:
-            raw = request(sock, 10, on_info=self._on_device_info,
-                          send_lock=self.w78_send_lock)
+            raw = request(sock, 10, on_info=lambda _body: None,
+                          send_lock=target.send_lock)
             if len(raw) != 40:
                 raise ValueError('诊断数据长度错误')
             values = struct.unpack('<10I', raw)
@@ -4583,7 +4603,7 @@ class LocalTcpApp:
                     open_drain = (packed >> 10) & 1
                     output_latch = (packed >> 11) & 1
                     rst_idr = (packed >> 1) & 1
-                    self._post('log', f'PB4 状态：MODER={mode:02b}，'
+                    target.log(f'PB4 状态：MODER={mode:02b}，'
                         f'OTYPER={open_drain}，ODR={output_latch}，RST_IDR={rst_idr} '
                         '（期望 MODER=01、OTYPER=0、ODR=0、RST_IDR=0）')
                     if mode == 1 and open_drain == 0 and output_latch == 0 and rst_idr == 1:
@@ -4600,11 +4620,11 @@ class LocalTcpApp:
                     0xD002:'第一次校准等待目标下降沿',0xD021:'第一次校准等待目标回高',
                     0xD003:'第二次校准等待目标下降沿',0xD031:'第二次校准等待目标回高'}.get(diagnostic.get('ISP_command'),'入口握手')
                 pins=diagnostic.get('hal_error',0)
-                self._post('log',f'超时位置：{stage}；引脚快照 DTA={pins&1} RST={(pins>>1)&1} P2.6={(pins>>2)&1} P2.7={(pins>>3)&1}')
+                target.log(f'超时位置：{stage}；引脚快照 DTA={pins&1} RST={(pins>>1)&1} P2.6={(pins>>2)&1} P2.7={(pins>>3)&1}')
 
             try:
-                preview_raw = request(sock, 11, on_info=self._on_device_info,
-                                      send_lock=self.w78_send_lock)
+                preview_raw = request(sock, 11, on_info=lambda _body: None,
+                                      send_lock=target.send_lock)
                 if len(preview_raw) != 4:
                     raise ValueError('接收字节诊断数据长度错误')
                 preview = struct.unpack('<I', preview_raw)[0]
@@ -4613,59 +4633,85 @@ class LocalTcpApp:
             except DeviceError as preview_error:
                 if preview_error.status != 11:
                     raise
-            self._post('log', 'W78 串口诊断：\n' + json.dumps(
+            target.log('W78 串口诊断：\n' + json.dumps(
                 diagnostic, ensure_ascii=False, indent=2))
         except (OSError, ValueError, RuntimeError) as diagnostic_error:
-            self._post('log', f'未取得扩展诊断：{diagnostic_error}')
+            target.log(f'未取得扩展诊断：{diagnostic_error}')
             if error == 9:
                 detail = '设备错误 9；旧固件会将接收超时也报告为初始化失败，请升级到 OTA 0.20.5 后区分'
         raise RuntimeError(f'W78 烧录失败：{detail}')
 
-    def _report_pic24_failure(self, sock, error):
+    def _report_pic24_failure(self, sock, error, target):
         """记录失败地址与实际读回值，便于核对接线和目标型号。"""
         reasons = {100:'HEX 数据无效',101:'芯片 ID 不匹配或 ISP 接线未连通',
                    102:'擦写或上传超时',103:'目标读回校验失败',104:'操作已停止',
                    105:'开发板计时器不可用',106:'HEX 缺少关键配置字或配置位无效'}
-        body = request(sock, 10, send_lock=self.w78_send_lock)
-        if len(body) == 40:
-            values = struct.unpack('<10I', body)
-            self._post('log', 'PIC24 诊断：地址 0x%06X，预期/命令 0x%06X，实际/ID 0x%06X' % (values[3], values[8], values[2]))
+        target.reject_commit()
+        try:
+            body = request(sock, 10, on_info=lambda _body: None, send_lock=target.send_lock)
+            if len(body) == 40:
+                values = struct.unpack('<10I', body)
+                target.log('PIC24 诊断：地址 0x%06X，预期/命令 0x%06X，实际/ID 0x%06X' % (values[3], values[8], values[2]))
+        except (OSError, ValueError, RuntimeError) as exc:
+            target.log(f'未取得扩展诊断：{exc}')
         raise RuntimeError('PIC24 烧录失败：' + reasons.get(error, '错误码 %s' % error))
 
     def _upload_w78_wireless(self):
+        if self.is_running:
+            return
         if not self.w78_target_var.get().startswith(('W78E516DDG', 'PIC24FJ256DA210')):
             messagebox.showinfo('烧录对象尚未接入', '请选择已接入的烧录对象。', parent=self.root)
             return
         if not self.w78_hex_path or not self.w78_hex_path.is_file():
             messagebox.showerror('未选择 HEX', '请先选择当前对象的完整 Intel HEX 文件。', parent=self.root)
             return
-        host_override = self.w78_host_var.get().strip()
         try:
-            args, key = self._connection_inputs(host_override=host_override)
+            targets, key = wireless_batch.inputs(self, 'hex')
         except ValueError as exc:
             messagebox.showerror('无法开始', str(exc), parent=self.root)
             return
         hex_path = self.w78_hex_path
         pic24 = self.w78_target_var.get().startswith('PIC24')
         target_name = 'PIC24FJ256DA210' if pic24 else 'W78E516DDG'
-        self.connection_summary_var.set(f'{args.host}:{args.port}')
+        chunk_size = self.w78_chunk_size
+        if len(targets) > 1:
+            confirmation = (wireless_batch.confirmation_targets(targets)
+                            + f'\n\n{target_name}\n{hex_path.name}')
+            if not messagebox.askyesno('确认批量无线烧录', confirmation, parent=self.root):
+                return
 
-        def action(args, key, stop_event):
+        def prepare():
             from pic24_hex import validate_pic24_hex
+
+            # 同一批设备共享一次 HEX 格式校验后的数据。
             if pic24:
-                package, capacity = validate_pic24_hex(hex_path), 262656
+                package, extent = validate_pic24_hex(hex_path), None
             else:
                 package, extent = validate_w78_hex(hex_path, include_extent=True)
-                capacity = None
             filename = validate_w78_filename(hex_path)
+            return lambda target: program(target, package, extent, filename)
+
+        def program(target, package, extent, filename):
+            stop_event = target.cancel
+            capacity = 262656 if pic24 else None
             total = len(package)
             version = '未知'
-            with self._connection(args, key, stop_event) as sock:
+            report_failure = self._report_pic24_failure if pic24 else self._report_w78_failure
+
+            def show(sent, size, detail, stage=0):
+                target.progress(100 * sent / size if size else 0, detail, stage)
+
+            def ignore_info(_body):
+                # 异步信息属于当前连接，避免多台设备覆盖总览已选设备。
+                pass
+
+            with closing(connect(target.args, target.key, on_info=ignore_info,
+                                 cancel=stop_event, on_socket=target.attach_socket)) as sock:
                 # 从本次认证连接读取版本，避免使用界面上其他设备或上次连接的数据。
                 if not pic24:
                     sock.settimeout(5)
                     try:
-                        info = request(sock, 1, on_info=self._on_device_info, send_lock=self.w78_send_lock)
+                        info = request(sock, 1, on_info=ignore_info, send_lock=target.send_lock)
                         version = str(parse_device_info(info).get('version') or '未知')
                     except (DeviceError, ValueError):
                         pass
@@ -4674,117 +4720,118 @@ class LocalTcpApp:
                     elif version == '1.4.69':
                         capacity = 65536
                     if capacity is None:
-                        self._post('log', f'F750 {version}：未确认 W78 写入范围，先显示设备返回的字节数。')
+                        target.log(f'F750 {version}：未确认 W78 写入范围，先显示设备返回的字节数。')
                     else:
-                        self._post('log', f'F750 {version}：W78 写入范围 {capacity:,} 字节，擦除范围 64 KiB。')
+                        target.log(f'F750 {version}：W78 写入范围 {capacity:,} 字节，擦除范围 64 KiB。')
                 # PIC24 擦写与读回时会有较长的状态间隔，交由可取消的短轮询处理。
                 sock.settimeout(120)
                 # 新版固件显式选择目标；旧版固件仅允许继续原 W78 流程。
                 try:
-                    request(sock, 30, 1 if pic24 else 0, send_lock=self.w78_send_lock)
+                    request(sock, 30, 1 if pic24 else 0, send_lock=target.send_lock)
                 except DeviceError as exc:
                     if pic24 or exc.status != 11:
                         raise RuntimeError('目标切换失败，请确认开发板固件为 1.3.7 或以上且当前未忙碌') from exc
-                ack = request(sock, 6, total, filename, on_info=self._on_device_info,
-                              send_lock=self.w78_send_lock)
+                ack = request(sock, 6, total, filename, on_info=ignore_info,
+                              send_lock=target.send_lock)
                 if len(ack) != 4 or struct.unpack('<I', ack)[0] != 0:
                     raise ValueError('设备没有接受当前对象的 HEX 上传请求。')
                 display_name = hex_path.name.encode('utf-8')[:191].decode('utf-8', errors='ignore').encode('utf-8')
                 try:
-                    request(sock, 25, payload=display_name, send_lock=self.w78_send_lock)
+                    request(sock, 25, payload=display_name, send_lock=target.send_lock)
                 except DeviceError as exc:
                     if exc.status != 11:
                         raise
-                    self._post('log', '当前开发板固件未提供中文文件名显示；升级至 1.2.0 后支持。')
+                    target.log('当前开发板固件未提供中文文件名显示；升级至 1.2.0 后支持。')
                 upload_started = time.monotonic()
                 session_id = uuid.uuid4().int & 0x00FFFFFF or 1
                 retry_causes = {'timeout': 0, 'crc': 0, 'sequence': 0}
                 def note_retry(reason):
                     retry_causes[reason] += 1
                 pipeline = upload_w78_window(
-                    sock, package, self.w78_chunk_size, session_id, stop_event,
-                    on_progress=lambda written, _total: self._post(
-                        'w78_progress', (written, total, f'HEX 接收确认：{written:,} / {total:,} 字节')),
-                    on_info=self._on_device_info, send_lock=self.w78_send_lock,
+                    sock, package, chunk_size, session_id, stop_event,
+                    on_progress=lambda written, _total: show(
+                        written, total, f'HEX 接收确认：{written:,} / {total:,} 字节'),
+                    on_info=ignore_info, send_lock=target.send_lock,
                     target=1 if pic24 else 0, on_retry=note_retry,
                 )
                 if pipeline is None:
                     # 老固件不支持流水协议；每个兼容帧仍不超过 16 KiB。
-                    legacy_chunk = min(self.w78_chunk_size, 16384)
-                    self._post('log', f'开发板未提供流水协议，改用 {legacy_chunk // 1024} KiB 顺序分包。')
+                    legacy_chunk = min(chunk_size, 16384)
+                    target.log(f'开发板未提供流水协议，改用 {legacy_chunk // 1024} KiB 顺序分包。')
                     for offset in range(0, total, legacy_chunk):
                         if stop_event.is_set():
                             raise InterruptedError()
                         block = package[offset:offset + legacy_chunk]
-                        ack = request(sock, 7, offset, block, on_info=self._on_device_info,
-                                      send_lock=self.w78_send_lock)
+                        ack = request(sock, 7, offset, block, on_info=ignore_info,
+                                      send_lock=target.send_lock)
                         written = offset + len(block)
                         if len(ack) != 4 or struct.unpack('<I', ack)[0] != written:
                             raise ValueError('设备返回的 HEX 上传进度不正确。')
-                        self._post('w78_progress', (written, total, f'HEX 接收确认：{written:,} / {total:,} 字节'))
+                        show(written, total, f'HEX 接收确认：{written:,} / {total:,} 字节')
                     logical_chunk, frame_size, upload_window, retries, raw_mode = (
-                        self.w78_chunk_size, legacy_chunk, 1, 0, False)
+                        chunk_size, legacy_chunk, 1, 0, False)
                 else:
                     logical_chunk, frame_size, upload_window, retries, raw_mode = pipeline
                     frame_format = '原始帧' if raw_mode else '旧协议兼容帧'
                     causes = '，'.join(f'{label} {retry_causes[key]}' for key, label in
                                        (('timeout', 'ACK 超时'), ('crc', 'CRC'), ('sequence', '序号')))
-                    self._post('log', f'流水上传：{frame_format} {frame_size:,} 字节，窗口 {upload_window}，重传 {retries} 次（{causes}）。')
+                    target.log(f'流水上传：{frame_format} {frame_size:,} 字节，窗口 {upload_window}，重传 {retries} 次（{causes}）。')
 
                 upload_seconds = max(time.monotonic() - upload_started, 0.001)
-                self._post('log', f'HEX 接收确认完成：{total:,} 字节，{upload_seconds:.2f} 秒，平均 {total / upload_seconds / 1024:.1f} KiB/秒；逻辑块 {logical_chunk:,} 字节，帧 {frame_size:,} 字节，窗口 {upload_window}。')
-                self._post('w78_progress', (0, capacity, 'HEX 已收齐；等待开发板确认芯片并开始实际写入'))
+                target.log(f'HEX 接收确认完成：{total:,} 字节，{upload_seconds:.2f} 秒，平均 {total / upload_seconds / 1024:.1f} KiB/秒；逻辑块 {logical_chunk:,} 字节，帧 {frame_size:,} 字节，窗口 {upload_window}。')
+                show(0, capacity, 'HEX 已收齐；等待开发板确认芯片并开始实际写入', 1)
 
                 if stop_event.is_set():
                     raise InterruptedError()
                 sock.settimeout(120)
                 operation_reader = SocketReader(sock)
-                self._post('status', '正在启动 ' + target_name + ' ISP…')
-                self._post('log', target_name + ' HEX 接收与传输校验完成，正在识别目标芯片；上传 ACK 不代表目标写入完成。')
-                self.w78_program_started = True
+                target.log(target_name + ' HEX 接收与传输校验完成，正在识别目标芯片；上传 ACK 不代表目标写入完成。')
                 ignored_upload_acks = set()
                 def note_late_ack(command):
                     if command not in ignored_upload_acks:
                         ignored_upload_acks.add(command)
-                        self._post('log', f'已跳过迟到的 HEX 上传确认响应（命令 {command}）。')
+                        target.log(f'已跳过迟到的 HEX 上传确认响应（命令 {command}）。')
                 # 从发送烧录命令开始计时，不包含 HEX 上传。
                 started_at = time.monotonic()
                 w78_timing = None if pic24 else W78StageTiming(started_at)
+                first_status = None
                 try:
-                    request_wait(sock, 8, 1 if pic24 else 0, on_info=self._on_device_info,
-                                 send_lock=self.w78_send_lock, reader=operation_reader,
+                    request_wait(sock, 8, 1 if pic24 else 0, on_info=ignore_info,
+                                 send_lock=target.send_lock, reader=operation_reader,
                                  cancel=stop_event, timeout=15, ignore_ops=(32, 33),
-                                 on_ignored=lambda response: note_late_ack(response & 0x7FFFFFFF))
+                                 on_ignored=lambda response: note_late_ack(response & 0x7FFFFFFF),
+                                 before_send=target.mark_committed)
                 except DeviceError:
-                    state_body = request_wait(sock, 9, on_info=self._on_device_info,
-                                              send_lock=self.w78_send_lock,
+                    target.reject_commit()
+                    state_body = request_wait(sock, 9, on_info=ignore_info,
+                                              send_lock=target.send_lock,
                                               reader=operation_reader, cancel=stop_event,
                                               timeout=15, ignore_ops=(8, 32, 33),
                                               on_ignored=lambda response: note_late_ack(response & 0x7FFFFFFF))
                     if len(state_body) == 72:
                         state, error = struct.unpack_from('<2I', state_body)
                         if state == W78_STATE_FAILED:
-                            self._report_pic24_failure(sock, error) if pic24 else self._report_w78_failure(sock, error)
+                            report_failure(sock, error, target)
                     raise
                 except TimeoutError:
                     # 启动 ACK 丢失时先读状态确认，绝不重复发送有副作用的启动命令。
-                    self._post('log', '启动确认暂未返回，正在读取开发板状态；不会重复启动或中断擦写。')
+                    target.log('启动确认暂未返回，正在读取开发板状态；不会重复启动或中断擦写。')
                     sampled_at = time.monotonic()
                     state_body = request_wait(
-                        sock, 9, on_info=self._on_device_info,
-                        send_lock=self.w78_send_lock, reader=operation_reader,
+                        sock, 9, on_info=ignore_info,
+                        send_lock=target.send_lock, reader=operation_reader,
                         cancel=stop_event, timeout=15, ignore_ops=(8, 32, 33),
                         on_ignored=lambda response: note_late_ack(response & 0x7FFFFFFF),
                     )
                     if len(state_body) != 72:
                         raise ValueError('开发板返回的烧录状态格式无效。')
                     observed_state, error = struct.unpack_from('<2I', state_body)
-                    if w78_timing is not None:
-                        w78_timing.observe(observed_state, sampled_at, time.monotonic())
                     if observed_state == W78_STATE_FAILED:
-                        self._report_pic24_failure(sock, error) if pic24 else self._report_w78_failure(sock, error)
-                    if observed_state not in tuple(range(4, 13)) + (W78_STATE_DONE,):
+                        report_failure(sock, error, target)
+                    if not 4 <= observed_state <= W78_STATE_DONE:
+                        target.reject_commit()
                         raise RuntimeError('开发板没有进入擦写状态；请重新启动烧录。')
+                    first_status = state_body
                 state_names = {
                     4: '复位并选择 ISP', 5: '等待目标启动', 6: '连接 ISP',
                     7: '同步数据包', 8: '擦除 APROM', 9: '发送 APROM 地址及校验值',
@@ -4801,24 +4848,29 @@ class LocalTcpApp:
                         if timing['stage'] is not None:
                             elapsed = max(now - timing['start'], 0.001)
                             advanced = max(0, timing['last'] - timing['first'])
-                            self._post('log', f"PIC24 {timing['stage']}：观测 {elapsed:.2f} 秒，进度推进 {advanced:,} 字节，平均 {advanced / elapsed / 1024:.1f} KiB/秒。")
+                            target.log(f"PIC24 {timing['stage']}：观测 {elapsed:.2f} 秒，进度推进 {advanced:,} 字节，平均 {advanced / elapsed / 1024:.1f} KiB/秒。")
                         timing.update(stage=stage, start=now, first=progress, last=progress)
                     elif stage is not None:
                         timing['last'] = progress
                 deadline = time.monotonic() + (600 if pic24 else 300)
                 wait_seconds = 0.5 if pic24 else 0.0
                 while time.monotonic() < deadline:
-                    if stop_event.wait(wait_seconds):
-                        raise InterruptedError()
-                    wait_seconds = 0.5 if pic24 else W78_STATUS_INTERVAL
-                    sampled_at = time.monotonic()
-                    body = request_wait(
-                        sock, 9, on_info=self._on_device_info,
-                        send_lock=self.w78_send_lock, reader=operation_reader,
-                        cancel=stop_event, timeout=max(1, deadline - time.monotonic()),
-                        ignore_ops=(8, 32, 33),
-                        on_ignored=lambda response: note_late_ack(response & 0x7FFFFFFF),
-                    )
+                    # 启动 ACK 丢失时，已确认的完成状态直接使用，无需再次查询。
+                    if first_status is not None:
+                        body = first_status
+                        first_status = None
+                    else:
+                        if stop_event.wait(wait_seconds):
+                            raise InterruptedError()
+                        wait_seconds = 0.5 if pic24 else W78_STATUS_INTERVAL
+                        sampled_at = time.monotonic()
+                        body = request_wait(
+                            sock, 9, on_info=ignore_info,
+                            send_lock=target.send_lock, reader=operation_reader,
+                            cancel=stop_event, timeout=max(1, deadline - time.monotonic()),
+                            ignore_ops=(8, 32, 33),
+                            on_ignored=lambda response: note_late_ack(response & 0x7FFFFFFF),
+                        )
                     if len(body) != 72:
                         raise ValueError('开发板返回的烧录状态格式无效。')
                     observed_at = time.monotonic()
@@ -4831,40 +4883,34 @@ class LocalTcpApp:
                     if state != last_reported_state:
                         phase = state_names.get(state, '校验通过（状态 13）' if
                                                 not pic24 and state == W78_STATE_DONE else f'状态 {state}')
-                        self._post('log', f'{target_name} 阶段：{phase}。')
+                        target.log(f'{target_name} 阶段：{phase}。')
                         last_reported_state = state
                     if pic24:
                         mark_pic_stage('写入程序' if state in (9, 10) else '读回校验' if state == 11 else None, programmed)
                     count_text = (f'{programmed:,} / {capacity:,} 字节' if capacity
                                   else f'已写入 {programmed:,} 字节')
                     if state == W78_STATE_FAILED:
-                        self._post('w78_progress', (programmed, capacity,
-                            f'{count_text}；目标校验未通过'))
-                        self._post('log', f'设备最终状态：{state}，错误码 {error}，'
+                        show(programmed, capacity, f'{count_text}；目标校验未通过', 2)
+                        target.log(f'设备最终状态：{state}，错误码 {error}，'
                             f'设备报告处理进度 {count_text}；尚未确认烧录成功。')
-                        self._report_pic24_failure(sock, error) if pic24 else self._report_w78_failure(sock, error)
+                        report_failure(sock, error, target)
                     if state == W78_STATE_DONE:
+                        target.log(f'{target_name} 写入并校验完成：{hex_path.name}')
                         if w78_timing is not None:
                             detail = w78_timing.detail()
                             actual = f'{programmed:,} 字节' if programmed else '实际写入量未上报'
-                            # 耗时只显示在完成进度区，不写入操作日志或本地记录文件。
-                            self._post('w78_progress', (1, 1, f'{hex_path.name} · 完成：{actual}｜{detail}（轮询观测）'))
-                            self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
-                        else:
-                            self._post('w78_progress', (capacity, capacity, f'{hex_path.name} · 写入并校验完成'))
-                            self._post('log', f'{target_name} 写入并校验完成：{hex_path.name}')
-                        self._post('status', target_name + ' 无线烧录完成')
-                        return
+                            # W78 耗时保留在逐台进度，操作日志只记录完成结果。
+                            return f'{hex_path.name} · 完成：{actual}｜{detail}（轮询观测）'
+                        return f'{hex_path.name} · 写入并校验完成'
                     if state in state_names:
                         percent = f'（{min(100, programmed * 100 // capacity)}%）' if capacity else ''
-                        self._post('w78_progress', (programmed, capacity, f'{state_names[state]}：{count_text}{percent}'))
-                        self._post('status', f'{target_name} | {state_names[state]} {percent}')
+                        show(programmed, capacity, f'{state_names[state]}：{count_text}{percent}',
+                             2 if state >= 11 else 1)
                     elif state == 3:
-                        self._post('status', f'HEX 已校验 | {received:,} 字节')
+                        show(0, capacity, f'HEX 已校验 | {received:,} 字节', 1)
                 raise TimeoutError('等待目标烧录完成超时；请查看开发板状态。')
 
-        self._start_task('无线烧录', action,
-                         require_connection=False, host_override=host_override)
+        wireless_batch.start(self, 'hex', '无线烧录', targets, key, None, prepare=prepare)
 
     @contextmanager
     def _ota_batch_session(self, args, key, stop_event, host, total, digest, on_info, layout):

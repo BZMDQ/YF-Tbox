@@ -16,7 +16,7 @@ if ([string]::IsNullOrWhiteSpace($WorkPath)) {
     $work = [IO.Path]::GetFullPath($WorkPath)
 }
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $root '研发工具箱_0.8.74.exe'
+    $OutputPath = Join-Path $root '研发工具箱_0.8.75.exe'
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 $dist = Split-Path -Parent $output
@@ -88,6 +88,7 @@ $arguments = @(
     '--hidden-import', 'boot_update_ui',
     '--hidden-import', 'd133_proxy_client',
     '--hidden-import', 'd133_proxy_ui',
+    '--hidden-import', 'wireless_batch',
     '--hidden-import', 'dataclasses',
     '--hidden-import', 'base64',
     '--hidden-import', 'contextlib',

@@ -169,6 +169,55 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         self.assertEqual(request.call_args.args[1], proxy.HARDWARE_CONFIG)
 
+    def test_profile_save_ack_without_readback_is_unconfirmed(self):
+        package = proxy.HardwarePackage(b'signed', 2, 'CS002', 'CS001', 'MIPI', 'GT9271', '800 × 1280')
+        previous = dict(info(), relay_hwcfg=1, usb_hwcfg=4)
+        with patch.object(proxy, 'connect', return_value=Mock()), \
+                patch.object(proxy, 'device_info', return_value=previous), \
+                patch.object(proxy, 'request', return_value=b'CS002'), \
+                patch.object(proxy.time, 'monotonic', side_effect=[0, 16]):
+            with self.assertRaisesRegex(TimeoutError, '已应答保存，尚未读回'):
+                proxy.install_hardware(SimpleNamespace(), b'k' * 32, package, Mock())
+
+    def test_batch_uses_one_pinned_package_and_maintains_target_commit_state(self):
+        # 模拟同一批目标的独立事务，明确区分数据发完、已经提交和已完成核对。
+        relay = [SimpleNamespace(host=ip, port=5000) for ip in ('192.0.2.1', '192.0.2.2')]
+        key = b'k' * 32
+        app = SimpleNamespace(is_running=False, root=object(),
+                              d133_proxy_path=Path('ota.cpio'), d133_proxy_signature=Path('ota.cpio.sig'))
+        package = proxy.Package(b'package', b'signature', '1.0.180')
+        with patch.object(ui.wireless_batch, 'inputs', return_value=(relay, key)), \
+                patch.object(ui.wireless_batch, 'start') as start, \
+                patch.object(ui.messagebox, 'askyesno', return_value=True), \
+                patch.object(ui, 'd133_render_package'), \
+                patch.object(proxy, 'load_usb_file', return_value=package) as load:
+            ui.start_update(app)
+        load.assert_called_once_with(app.d133_proxy_path, app.d133_proxy_signature)
+        _, kind, _, targets, batch_key, program = start.call_args.args
+        self.assertEqual((kind, targets, batch_key), ('d133', relay, key))
+
+        def send(args, send_key, pinned, report, cancel, commit):
+            self.assertIs(send_key, key)
+            self.assertIs(pinned, package)
+            report(100, '数据全部已写入')
+            if args is relay[0]:
+                commit()
+                report(100, '等待健康确认')
+                raise TimeoutError('未确认新系统健康')
+            raise ConnectionError('USB 已断开')
+
+        first, second = [SimpleNamespace(args=item, key=key, cancel=threading.Event(),
+                                         progress=Mock(), committed=False) for item in relay]
+        first.mark_committed = lambda: setattr(first, 'committed', True)
+        second.mark_committed = Mock()
+        with patch.object(proxy, 'upload_package', side_effect=send):
+            self.assertEqual(program(first), ('pending', '未确认新系统健康'))
+            with self.assertRaisesRegex(ConnectionError, 'USB 已断开'):
+                program(second)
+        self.assertEqual([item.args[2] for item in first.progress.call_args_list], [1, 2])
+        second.progress.assert_called_once_with(100, '数据全部已写入', 1)
+        second.mark_committed.assert_not_called()
+
     def test_pc_declines_usb_update_before_any_task(self):
         app = SimpleNamespace(
             is_running=False, root=object(),

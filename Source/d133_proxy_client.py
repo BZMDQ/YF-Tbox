@@ -266,7 +266,13 @@ def monitor(connection, package, initial, target, progress, cancel=None, timeout
 def upload(args, key, path, progress, cancel=None, on_commit=None, signature_path=None):
     if len(key) != 32:
         raise ValueError('D133经F750 USB更新必须导入配套32字节Local TCP Key')
-    package = load_package(path, signature_path)
+    return upload_package(args, key, load_package(path, signature_path), progress, cancel, on_commit)
+
+
+def upload_package(args, key, package, progress, cancel=None, on_commit=None):
+    """使用已预检的不可变包，让同批设备接收一致的固件和签名。"""
+    if len(key) != 32:
+        raise ValueError('D133经F750 USB更新必须导入配套32字节Local TCP Key')
 
     def connection():
         # 沿用F750原认证与IPv4路由策略；认证信息帧始终属于F750。
@@ -415,5 +421,5 @@ def install_hardware(args, key, package, progress, cancel=None, on_commit=None):
         else:
             cancel.wait(1)
     if ack is not None:
-        return 'D133 已应答保存，尚未读回登记表。'
+        raise TimeoutError('D133 已应答保存，尚未读回登记表。')
     raise TimeoutError('登记结果尚未确认，请在 F750 的 USB 控制中读取屏幕列表。')

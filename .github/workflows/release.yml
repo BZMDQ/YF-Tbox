@@ -32,7 +32,7 @@ jobs:
         shell: pwsh
         working-directory: Source
         run: |
-          python -m unittest test_connection_transport test_gui_connection_policy test_ota_window1 test_boot_update test_d133_proxy test_wireless_page -v
+          python -m unittest test_connection_transport test_gui_connection_policy test_ota_window1 test_boot_update test_d133_proxy test_wireless_page test_wireless_batch -v
           if ($LASTEXITCODE -ne 0) { throw 'Connection or transfer checks failed.' }
           python test_w78_pipeline.py
           if ($LASTEXITCODE -ne 0) { throw 'HEX pipeline checks failed.' }
@@ -88,6 +88,7 @@ jobs:
             0.8.72 在“无线烧录 → D133 USB A/B”中可从目录选 F750 IP 或手动填写。新增签名独立屏幕配置包 .d133cfg，保留 CPIO 系统 OTA。自定义屏幕配合 F750 1.5.5 与 D133 1.0.177。
             0.8.73 统一 D133 USB 与 HEX 页面布局，端口沿用全局配置。D133 1.0.178 支持 .d133cfg 只登记，之后可在 F750 USB 控制中手动切换。
             已完成主机连接策略和打包界面检查；实际开发板与公司网络的速度和长时间稳定性需现场验证。
+            0.8.75 无线烧录可添加多台 F750，用同一文件进行 HEX 烧录、D133 USB A/B 更新或屏幕配置登记。最多并发 4 台，每台独立显示进度与结果。
             工具箱不会自动检查、下载或安装更新。
           files: |
             ${{ steps.build.outputs.output }}
