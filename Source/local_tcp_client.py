@@ -31,6 +31,7 @@ OTA_TRANSFER_WINDOW = 2
 OTA_TRANSFER_CAPS_OP = 35
 OTA_LAYOUT_OP = 36
 OTA_LEGACY_CHUNK_SIZE = 1024
+OTA_RESPONSE_READ_SIZE = 4096
 OTA_RAM_SIZE = 0x3C000
 W78_MAX_HEX_SIZE = 512 * 1024
 W78_CHUNK_SIZE = 32768
@@ -68,7 +69,7 @@ class DeviceError(RuntimeError):
 def frame(op, offset=0, payload=b''):
     prefix = struct.pack('<4sIII', b'LNET', op, offset, len(payload))
     crc = zlib.crc32(payload, zlib.crc32(prefix)) & 0xffffffff
-    return prefix + struct.pack('<I', crc) + payload
+    return b''.join((prefix, struct.pack('<I', crc), payload))
 
 
 def exact(sock, count):
@@ -83,13 +84,14 @@ def exact(sock, count):
 
 class SocketReader:
     """Buffered reader for sockets that use short timeouts while listening."""
-    def __init__(self, sock):
+    def __init__(self, sock, read_ahead=0):
         self.sock = sock
         self.buffer = bytearray()
+        self.read_ahead = read_ahead
 
     def peek(self, count):
         while len(self.buffer) < count:
-            part = self.sock.recv(count - len(self.buffer))
+            part = self.sock.recv(max(count - len(self.buffer), self.read_ahead))
             if not part:
                 raise ConnectionError('设备已关闭连接')
             self.buffer.extend(part)
@@ -130,12 +132,15 @@ def receive(sock, reader=None):
 
 
 def request(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
-            reader=None):
+            reader=None, cancel=None):
+    packet = frame(op, offset, payload)
     if send_lock is None:
-        sock.sendall(frame(op, offset, payload))
+        _check_cancel(cancel)
+        sock.sendall(packet)
     else:
         with send_lock:
-            sock.sendall(frame(op, offset, payload))
+            _check_cancel(cancel)
+            sock.sendall(packet)
     while True:
         response, body = receive(sock, reader=reader)
         if response == op | 0x80000000:
@@ -150,7 +155,8 @@ def request(sock, op, offset=0, payload=b'', on_info=None, send_lock=None,
 
 
 def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None,
-                      on_info=None, send_lock=None, cancel=None, on_mode=None, window=1):
+                      on_info=None, send_lock=None, cancel=None, on_mode=None, window=1,
+                      reader=None):
     """按设备能力使用窗口 1 或 2，按 Flash 写入回执推进进度。"""
     if not 0 < chunk_size <= OTA_MAX_CHUNK_SIZE or window not in (1, OTA_TRANSFER_WINDOW):
         raise ValueError('系统 OTA 分片或窗口大小无效')
@@ -159,7 +165,8 @@ def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None
     if chunk_size > OTA_CHUNK_SIZE or window > 1:
         # 查询能力不修改槽位。旧固件返回不支持或未知命令的权限错误。
         try:
-            caps = request(sock, OTA_TRANSFER_CAPS_OP, on_info=on_info, send_lock=send_lock)
+            caps = request(sock, OTA_TRANSFER_CAPS_OP, on_info=on_info, send_lock=send_lock,
+                           reader=reader, cancel=cancel)
         except DeviceError as exc:
             if exc.status not in (11, 13):
                 raise
@@ -177,26 +184,29 @@ def upload_ota_stream(sock, package, chunk_size=OTA_CHUNK_SIZE, on_progress=None
 
     next_offset = written = 0
     pending = []
-    while written < len(package):
+    # 用视图直接取包数据，组帧前无需再复制每个分片。
+    package_view = memoryview(package)
+    total = len(package_view)
+    while written < total:
         if cancel is not None and cancel.is_set():
             raise InterruptedError()
         outgoing = []
-        while len(pending) < window and next_offset < len(package):
-            end = min(len(package), next_offset + chunk_size)
-            outgoing.append(frame(3, next_offset, package[next_offset:end]))
+        while len(pending) < window and next_offset < total:
+            end = min(total, next_offset + chunk_size)
+            outgoing.append(frame(3, next_offset, package_view[next_offset:end]))
             pending.append(end)
             next_offset = end
         if outgoing:
             packets = b''.join(outgoing)
             if send_lock is None:
+                _check_cancel(cancel)
                 sock.sendall(packets)
             else:
                 with send_lock:
-                    if cancel is not None and cancel.is_set():
-                        raise InterruptedError()
+                    _check_cancel(cancel)
                     sock.sendall(packets)
 
-        response, ack = receive(sock)
+        response, ack = receive(sock, reader=reader)
         if response == 0x80000001:
             if on_info:
                 on_info(ack)
@@ -787,11 +797,14 @@ def main():
             layout = struct.unpack_from('<I', package, 8)[0]
             check_ota_layout(sock, layout)
             request(sock, 2, offset=2 if layout == 2 else 0, payload=struct.pack('<I', len(package)) + digest)
+            # 上传和提交共用读取缓冲，保留一次读取中的后续响应或设备信息。
+            reader = SocketReader(sock, read_ahead=OTA_RESPONSE_READ_SIZE)
             upload_ota_stream(
                 sock, package, chunk_size=OTA_MAX_CHUNK_SIZE, window=OTA_TRANSFER_WINDOW,
+                reader=reader,
                 on_progress=lambda written: print(
                     f'\r写入 W25：{written}/{len(package)}', end='', flush=True))
-            request(sock, 4)
+            request(sock, 4, reader=reader)
             print(f'\n{version} 校验通过并提交安装，设备正在重启。')
     if args.command == 'ota':
         deadline = time.monotonic() + 120

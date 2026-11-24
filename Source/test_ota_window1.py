@@ -5,6 +5,7 @@ import struct
 import threading
 import unittest
 from contextlib import contextmanager
+from unittest.mock import Mock
 
 import local_tcp_client as client
 
@@ -118,6 +119,33 @@ class WindowOne(unittest.TestCase):
             client.upload_ota_stream(connection, package, chunk_size=32768, window=2,
                                      on_mode=lambda *value: modes.append(value))
         self.assertEqual(modes, [(16384, 1)])
+
+    def test_read_ahead_preserves_two_acks_and_info_before_commit(self):
+        size = 32768
+        package = b'a' * size + b'tail'
+        capability = client.frame(0x80000023, payload=struct.pack('<II', size, 2))
+        ack1 = client.frame(0x80000003, payload=struct.pack('<I', size))
+        ack2 = client.frame(0x80000003, payload=struct.pack('<I', len(package)))
+        info = client.frame(0x80000001, payload=b'{}')
+        commit = client.frame(0x80000004)
+        sock = Mock()
+        sock.recv.side_effect = [capability, ack1 + ack2 + info, commit]
+        reader = client.SocketReader(sock, read_ahead=client.OTA_RESPONSE_READ_SIZE)
+        progress, messages = [], []
+
+        client.upload_ota_stream(sock, package, chunk_size=size, window=2, reader=reader,
+                                 on_progress=progress.append, on_info=messages.append)
+        client.request(sock, 4, on_info=messages.append, reader=reader)
+
+        # 同次读取到的两条 ACK 仍按偏移消费，后续通知交给提交阶段。
+        self.assertEqual(progress, [size, len(package)])
+        self.assertEqual(messages, [b'{}'])
+        self.assertEqual(sock.recv.call_count, 3)
+        self.assertEqual([call.args[0] for call in sock.sendall.call_args_list], [
+            client.frame(35),
+            client.frame(3, 0, package[:size]) + client.frame(3, size, package[size:]),
+            client.frame(4),
+        ])
 
     def test_layout_preflight_refuses_wrong_board_before_begin(self):
         def handler(connection):

@@ -1,10 +1,10 @@
 """只读连接恢复与旧 App 包入口的定向验证，不接触开发板。"""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 import queue
 import threading
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import device_directory
 import local_tcp_gui as gui
@@ -228,6 +228,54 @@ class GuiConnectionPolicy(unittest.TestCase):
                     self.fail('取消后仍进入业务阶段')
         self.assertIsNone(app.active_socket)
         self.assertIsNone(app.connecting_socket)
+
+
+class OtaConnectionPolicy(unittest.TestCase):
+    def test_two_devices_use_distinct_sending_locks(self):
+        app = gui.LocalTcpApp.__new__(gui.LocalTcpApp)
+        app.socket_lock = threading.Lock()
+        app.active_ota_sessions = {}
+        app._post = app._close_socket = lambda *_: None
+        stop = threading.Event()
+        addresses = ('192.0.2.10', '192.0.2.11')
+
+        # 两台设备同时停留在 OTA 会话中，布局与启动必须共用各自连接的发送锁。
+        with patch.object(gui, 'connect', side_effect=(object(), object())), \
+                patch.object(gui, 'check_ota_layout') as check_layout, \
+                patch.object(gui, 'request') as request, ExitStack() as sessions:
+            for address in addresses:
+                args = SimpleNamespace(host=address, port=5000)
+                sessions.enter_context(app._ota_batch_session(
+                    args, b'key', stop, address, 32768, b'0' * 32, None, 1))
+            self.assertEqual(set(app.active_ota_sessions), set(addresses))
+
+        locks = [call.kwargs['send_lock'] for call in request.call_args_list]
+        self.assertIsNot(locks[0], locks[1])
+        self.assertEqual(locks, [call.kwargs['send_lock'] for call in check_layout.call_args_list])
+        self.assertEqual(app.active_ota_sessions, {})
+
+    def test_stop_sends_cancel_on_upload_socket_only(self):
+        app = gui.LocalTcpApp.__new__(gui.LocalTcpApp)
+        app.socket_lock = threading.Lock()
+        app.is_running = app.ota_batch_running = True
+        app.d133_proxy_running = app.boot_update_running = False
+        app.stop_event = threading.Event()
+        app.task_thread = SimpleNamespace(is_alive=lambda: True)
+        app.stop_button = SimpleNamespace(configure=lambda **_: None)
+        app._set_status = app._append_log = lambda *_: None
+        app._cancel_socket_async = Mock()
+        uploading = gui.OtaTargetSession(object())
+        committing = gui.OtaTargetSession(object())
+        committing.committing = True
+        app.active_ota_sessions = {'192.0.2.10': uploading, '192.0.2.11': committing}
+
+        app._stop_operation()
+
+        self.assertTrue(app.stop_event.is_set())
+        self.assertEqual([call.args[:3] for call in app._cancel_socket_async.call_args_list], [
+            (uploading.sock, gui.frame(5), uploading.send_lock),
+            (committing.sock, None, committing.send_lock),
+        ])
 
 
 if __name__ == '__main__':

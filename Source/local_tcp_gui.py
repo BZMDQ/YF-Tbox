@@ -30,8 +30,8 @@ import customtkinter as ctk
 from PIL import Image, ImageOps
 
 from local_tcp_client import (
-    DeviceError, OTA_MAX_CHUNK_SIZE, OTA_LEGACY_CHUNK_SIZE, OTA_TRANSFER_WINDOW, W78_CHUNK_SIZE,
-    W78_LOGICAL_CHUNK_SIZES, SocketReader,
+    DeviceError, OTA_MAX_CHUNK_SIZE, OTA_LEGACY_CHUNK_SIZE, OTA_TRANSFER_WINDOW, OTA_RESPONSE_READ_SIZE,
+    W78_CHUNK_SIZE, W78_LOGICAL_CHUNK_SIZES, SocketReader,
     W78_STATE_DONE, W78_STATE_FAILED, bind_lan_route, connect, frame, receive, request,
     upload_w78_window, validate_package, check_ota_layout, validate_w78_filename, validate_w78_hex, parse_device_info,
     request_wait, upload_ota_stream, W78StageTiming,
@@ -43,7 +43,7 @@ from operation_history import HistoryError, OperationHistory
 
 
 APP_TITLE = '研发工具箱'
-APP_VERSION = '0.8.77'
+APP_VERSION = '0.8.78'
 APP_ICON_FILE = 'research_toolbox.ico'
 APP_LOGO_FILE = 'wslogo.png'
 DEFAULT_PORT = 5000
@@ -686,6 +686,13 @@ def normalize_device_info(data):
     return values
 
 
+class OtaTargetSession:
+    def __init__(self, sock):
+        self.sock = sock
+        self.send_lock = threading.Lock()
+        self.committing = False
+
+
 class LocalTcpApp:
     def __init__(self, root):
         self.root = root
@@ -705,12 +712,10 @@ class LocalTcpApp:
         self.socket_lock = threading.Lock()
         self.active_socket = None
         self.connecting_socket = None
-        self.active_ota_sockets = {}
-        self.ota_socket_cancel_allowed = {}
+        self.active_ota_sessions = {}
         self.ota_batch_running = False
         self.ota_device_rows = {}
         self.w78_program_started = False
-        self.ota_send_lock = threading.Lock()
         self.w78_send_lock = threading.Lock()
         self.process_lock = threading.Lock()
         self.active_process = None
@@ -2703,8 +2708,7 @@ class LocalTcpApp:
     def _finish_task(self):
         self.wireless_batch_job = None
         with self.socket_lock:
-            self.active_ota_sockets.clear()
-            self.ota_socket_cancel_allowed.clear()
+            self.active_ota_sessions.clear()
         self.ota_batch_running = False
         self.is_running = False
         self.stop_event = None
@@ -3194,20 +3198,21 @@ class LocalTcpApp:
             return
         if self.ota_batch_running:
             with self.socket_lock:
-                active_ota = list(self.active_ota_sockets.items())
-                committing = [
-                    host for host, _sock in active_ota
-                    if not self.ota_socket_cancel_allowed.get(host, True)
+                # 停止与进入提交使用同一把状态锁，确保提交阶段只断开连接。
+                self.stop_event.set()
+                active_ota = [
+                    (host, session.sock, session.send_lock, session.committing)
+                    for host, session in self.active_ota_sessions.items()
                 ]
+            committing = [host for host, _sock, _lock, submitting in active_ota if submitting]
             if committing:
-                self._append_log('已停止电脑端等待；正在提交的设备会继续完成写入：' + '、'.join(committing))
-            self.stop_event.set()
+                self._append_log('已停止等待以下设备的提交结果：' + '、'.join(committing))
             self.stop_button.configure(state=tk.DISABLED, fg_color=COLORS['error_bg'],
                                        hover_color='#FECACA', text_color=COLORS['error_text'])
             self._set_status('正在停止多设备更新…')
-            for host, ota_socket in active_ota:
+            for host, ota_socket, send_lock, submitting in active_ota:
                 self._cancel_socket_async(
-                    ota_socket, None if host in committing else frame(5), self.ota_send_lock,
+                    ota_socket, None if submitting else frame(5), send_lock,
                     f'OTA-cancel-{host}',
                 )
             if active_ota:
@@ -4922,14 +4927,13 @@ class LocalTcpApp:
                 raise InterruptedError()
             self._post('ota_target_status', (host, '正在连接'))
             sock = connect(args, key, on_info=on_info, cancel=stop_event)
-            if stop_event.is_set():
-                self._close_socket(sock)
-                raise InterruptedError()
-            with self.socket_lock:
-                self.active_ota_sockets[host] = sock
-                self.ota_socket_cancel_allowed[host] = True
+            session = OtaTargetSession(sock)
             try:
-                check_ota_layout(sock, layout, on_info=on_info, send_lock=self.ota_send_lock)
+                with self.socket_lock:
+                    if stop_event.is_set():
+                        raise InterruptedError()
+                    self.active_ota_sessions[host] = session
+                check_ota_layout(sock, layout, on_info=on_info, send_lock=session.send_lock)
                 if not key:
                     self._post('ota_target_status', (host, '等待设备端确认'))
                     self._post(
@@ -4939,7 +4943,7 @@ class LocalTcpApp:
                 try:
                     request(
                         sock, 2, offset=2 if layout == 2 else 0, payload=struct.pack('<I', total) + digest,
-                        on_info=on_info, send_lock=self.ota_send_lock,
+                        on_info=on_info, send_lock=session.send_lock, cancel=stop_event,
                     )
                 except DeviceError as exc:
                     if exc.status != 11 or attempt == 4:
@@ -4953,13 +4957,12 @@ class LocalTcpApp:
                     if stop_event.wait(1.0):
                         raise InterruptedError() from exc
                     continue
-                yield sock
+                yield session
                 return
             finally:
                 with self.socket_lock:
-                    if self.active_ota_sockets.get(host) is sock:
-                        self.active_ota_sockets.pop(host, None)
-                    self.ota_socket_cancel_allowed.pop(host, None)
+                    if self.active_ota_sessions.get(host) is session:
+                        self.active_ota_sessions.pop(host, None)
                 self._close_socket(sock)
         raise RuntimeError('设备未能分配可升级的 Local TCP 主连接。')
 
@@ -5027,23 +5030,26 @@ class LocalTcpApp:
                         try:
                             with self._ota_batch_session(
                                 args, key, stop_event, host, total, digest, info_callback, layout,
-                            ) as sock:
+                            ) as session:
+                                sock = session.sock
                                 sock.settimeout(120)
+                                # 数据确认及提交共用读取缓冲，保留提前收到的设备信息。
+                                reader = SocketReader(sock, read_ahead=OTA_RESPONSE_READ_SIZE)
                                 self._post('ota_target_status', (host, '正在传输'))
                                 upload_ota_stream(
                                     sock, package, chunk_size=chunk_size,
                                     window=1 if chunk_size == OTA_LEGACY_CHUNK_SIZE else OTA_TRANSFER_WINDOW,
-                                    on_info=info_callback, send_lock=self.ota_send_lock,
-                                    cancel=stop_event,
+                                    on_info=info_callback, send_lock=session.send_lock,
+                                    cancel=stop_event, reader=reader,
                                     on_progress=lambda written: self._post(
                                         'ota_target_progress', (host, written, total)),
                                     on_mode=lambda size, window: self._post(
                                         'log', f'[{host}] OTA 分片 {size} 字节，窗口 {window}，按偏移逐片确认。'),
                                 )
-                                if stop_event.is_set():
-                                    raise InterruptedError()
                                 with self.socket_lock:
-                                    self.ota_socket_cancel_allowed[host] = False
+                                    if stop_event.is_set():
+                                        raise InterruptedError()
+                                    session.committing = True
                                 self._post('ota_target_status', (host, '设备校验并提交中'))
                                 self._post(
                                     'log',
@@ -5053,7 +5059,7 @@ class LocalTcpApp:
                                 try:
                                     request(
                                         sock, 4, on_info=info_callback,
-                                        send_lock=self.ota_send_lock,
+                                        send_lock=session.send_lock, reader=reader, cancel=stop_event,
                                     )
                                 except OSError as exc:
                                     if stop_event.is_set():
