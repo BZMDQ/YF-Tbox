@@ -1,5 +1,6 @@
 """代理路径的真实socket/帧模型；仅127.0.0.1及临时文件，不连接硬件。"""
 from contextlib import closing, contextmanager
+from dataclasses import replace
 import json
 from pathlib import Path
 import select
@@ -99,6 +100,45 @@ class Peer:
 
 
 class ProxyTests(unittest.TestCase):
+    def test_transfer_sends_original_filename_only_to_capable_relay(self):
+        filename = 'D133 屏幕更新.cpio'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / filename
+            path.write_bytes(cpio())
+            Path(str(path) + '.sig').write_bytes(b'signature')
+            package = proxy.load_package(path)
+
+        cases = (
+            ({'file_name_v1': True}, filename, filename.encode('utf-8')),
+            ({'file_name_v1': True}, 'x' * 186 + '.cpio', b'x' * 186 + b'.cpio'),
+            ({}, filename, None),
+            ({'file_name_v1': 1}, filename, None),
+            ({'file_name_v1': True}, '中' * 64 + '.cpio', None),
+            ({'file_name_v1': True}, 'D133\ud800.cpio', None),
+        )
+        for capabilities, selected_name, transmitted_name in cases:
+            with self.subTest(capabilities=capabilities, selected_name=selected_name):
+                def handler(sock):
+                    self.assertEqual(read_frame(sock), (proxy.INFO, 0, b''))
+                    reply(sock, proxy.INFO, json.dumps(info(**capabilities)).encode())
+                    op, offset, metadata = read_frame(sock)
+                    self.assertEqual((op, offset, len(metadata)), (proxy.BEGIN, 0, 132 + len(package.signature)))
+                    reply(sock, proxy.BEGIN)
+                    if transmitted_name is not None:
+                        self.assertEqual(read_frame(sock), (0xD10B, 0, transmitted_name))
+                        reply(sock, 0xD10B)
+                    for offset in range(0, len(package.data), 4096):
+                        block = package.data[offset:offset + 4096]
+                        self.assertEqual(read_frame(sock), (proxy.DATA, offset, block))
+                        reply(sock, proxy.DATA, struct.pack('<I', offset + len(block)))
+                    self.assertEqual(read_frame(sock), (proxy.COMMIT, 0, b''))
+                    reply(sock, proxy.COMMIT, struct.pack('<I', len(package.data)))
+
+                with Peer(handler) as sock:
+                    # 常规情况保留真实路径加载的包，边界名称用同一份有效内容。
+                    loaded = package if selected_name == filename else replace(package, filename=selected_name)
+                    self.assertEqual(proxy.transfer(sock, loaded, proxy.device_info(sock), Mock()), 'B')
+
     def test_screen_prompt_uses_explicit_boolean_capability(self):
         package = proxy.Package(b'package', b'signature', '1.0.170')
         cases = [

@@ -16,6 +16,8 @@ from local_tcp_client import HEADER, connect, exact, frame
 INFO, DATA, COMMIT, HEALTH, BEGIN, CANCEL = 0xD100, 0xD102, 0xD103, 0xD105, 0xD106, 0xD107
 LOGICAL_DATA = 0xD109
 HARDWARE_CONFIG = 0xD10A
+FILE_NAME = 0xD10B
+FILE_NAME_MAX_BYTES = 191
 SCREEN_CODE_PATTERN = r'[A-Z0-9][A-Z0-9._#-]{0,23}'
 LEGACY_CHUNK_SIZE = 4096
 LARGE_CHUNK_SIZE = 32768
@@ -47,6 +49,7 @@ class Package:
     data: bytes
     signature: bytes
     version: str
+    filename: str = ''
 
 
 def load_package(path, signature_path=None):
@@ -65,7 +68,7 @@ def load_package(path, signature_path=None):
     signature = signature_path.read_bytes()
     if not 1 <= len(signature) <= 512:
         raise ValueError('同名RSA签名长度必须为1到512字节')
-    return Package(data, signature, version)
+    return Package(data, signature, version, path.name)
 
 
 def _send_request(sock, op, offset, payload):
@@ -176,6 +179,17 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
     target = 'B' if info['slot'] == 'A' else 'A'
     chunk_size, window, begin_offset = _transfer_mode(info)
     data_op = DATA if chunk_size == LEGACY_CHUNK_SIZE else LOGICAL_DATA
+    filename = b''
+    filename_notice = ''
+    if info.get('file_name_v1') is True and package.filename:
+        try:
+            filename = package.filename.encode('utf-8')
+        except UnicodeEncodeError:
+            filename_notice = '；文件名无法用 UTF-8 记录'
+        if len(filename) > FILE_NAME_MAX_BYTES:
+            # 完整名称超限时保留原升级流程，避免记录截断后的其它名称。
+            filename = b''
+            filename_notice = f'；文件名超过 UTF-8 {FILE_NAME_MAX_BYTES} 字节，本次未传'
     total = len(package.data)
     metadata = struct.pack('<I32s32s32s32s', total, hashlib.sha256(package.data).digest(),
                            PRODUCT.encode(), HARDWARE.encode(), package.version.encode())
@@ -188,9 +202,14 @@ def transfer(sock, package, info, progress, cancel=None, on_commit=None):
             confirmation = f'电脑端已确认，D133将校验签名并更新非活动槽{target}'
         else:
             confirmation = f'等待D133屏幕确认写入槽{target}'
-        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{mode}；{confirmation}')
+        progress(0, f'D133 {info["version"]} / 槽{info["slot"]}；{mode}；{confirmation}{filename_notice}')
         # BEGIN 偏移 2/3/4 分别选 32/64/128 KiB 双窗口；窗口 1 用偏移 0。
         request(sock, BEGIN, offset=begin_offset, payload=metadata + package.signature)
+        if filename:
+            _check_cancel(cancel)
+            # 仅向支持该命令的 F750 发送本次会话的文件名，保持 D133 签名包与数据格式。
+            if request(sock, FILE_NAME, payload=filename) != b'':
+                raise ValueError('F750 更新文件名应答应为空')
         last_progress = started = time.monotonic()
         while written < total:
             _check_cancel(cancel)
